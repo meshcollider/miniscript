@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <assert.h>
 
+#include <iostream>
+
 #include <policy/policy.h>
 #include <script/script.h>
 #include <span.h>
@@ -809,7 +811,391 @@ public:
     Node(NodeType nt, uint32_t val = 0) : nodetype(nt), k(val), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType()), scriptlen(CalcScriptLen()) {}
 };
 
+
+
+//! A (potentially blank) node template with information to build a miniscript node, after all subexpressions are parsed.
+template<typename Key>
+struct NodeBuilder {
+public:
+    bool is_blank;
+    NodeType nodetype;
+    uint32_t k = 0;
+    std::vector<Key> keys;
+    std::vector<unsigned char> data;
+    std::vector<std::shared_ptr<NodeBuilder<Key>>> subs;
+
+    //! Internal code for ToString.
+    template<typename Ctx>
+    std::string MakeString(const Ctx& ctx, bool& success, bool wrapped = false) const {
+        std::string ret = wrapped ? ":" : "";
+        if (is_blank) return "(blank)";
+
+        switch (nodetype) {
+            case NodeType::WRAP_A: return "a" + subs[0]->MakeString(ctx, success, true);
+            case NodeType::WRAP_S: return "s" + subs[0]->MakeString(ctx, success, true);
+            case NodeType::WRAP_C:
+                if (subs[0]->nodetype == NodeType::PK_K) {
+                    // pk(K) is syntactic sugar for c:pk_k(K)
+                    std::string key_str;
+                    success = ctx.ToString(subs[0]->keys[0], key_str);
+                    return std::move(ret) + "pk(" + std::move(key_str) + ")";
+                }
+                if (subs[0]->nodetype == NodeType::PK_H) {
+                    // pkh(K) is syntactic sugar for c:pk_h(K)
+                    std::string key_str;
+                    success = ctx.ToString(subs[0]->keys[0], key_str);
+                    return std::move(ret) + "pkh(" + std::move(key_str) + ")";
+                }
+                return "c" + subs[0]->MakeString(ctx, success, true);
+            case NodeType::WRAP_D: return "d" + subs[0]->MakeString(ctx, success, true);
+            case NodeType::WRAP_V: return "v" + subs[0]->MakeString(ctx, success, true);
+            case NodeType::WRAP_J: return "j" + subs[0]->MakeString(ctx, success, true);
+            case NodeType::WRAP_N: return "n" + subs[0]->MakeString(ctx, success, true);
+            case NodeType::AND_V:
+                // t:X is syntactic sugar for and_v(X,1).
+                if (subs[1]->nodetype == NodeType::JUST_1) return "t" + subs[0]->MakeString(ctx, success, true);
+                break;
+            case NodeType::OR_I:
+                if (subs[0]->nodetype == NodeType::JUST_0) return "l" + subs[1]->MakeString(ctx, success, true);
+                if (subs[1]->nodetype == NodeType::JUST_0) return "u" + subs[0]->MakeString(ctx, success, true);
+                break;
+            default:
+                break;
+        }
+
+        switch (nodetype) {
+            case NodeType::PK_K: {
+                std::string key_str;
+                success = ctx.ToString(keys[0], key_str);
+                return std::move(ret) + "pk_k(" + std::move(key_str) + ")";
+            }
+            case NodeType::PK_H: {
+                std::string key_str;
+                success = ctx.ToString(keys[0], key_str);
+                return std::move(ret) + "pk_h(" + std::move(key_str) + ")";
+            }
+            case NodeType::AFTER: return std::move(ret) + "after(" + std::to_string(k) + ")";
+            case NodeType::OLDER: return std::move(ret) + "older(" + std::to_string(k) + ")";
+            case NodeType::HASH256: return std::move(ret) + "hash256(" + HexStr(data.begin(), data.end()) + ")";
+            case NodeType::HASH160: return std::move(ret) + "hash160(" + HexStr(data.begin(), data.end()) + ")";
+            case NodeType::SHA256: return std::move(ret) + "sha256(" + HexStr(data.begin(), data.end()) + ")";
+            case NodeType::RIPEMD160: return std::move(ret) + "ripemd160(" + HexStr(data.begin(), data.end()) + ")";
+            case NodeType::JUST_1: return std::move(ret) + "1";
+            case NodeType::JUST_0: return std::move(ret) + "0";
+            case NodeType::AND_V: return std::move(ret) + "and_v(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
+            case NodeType::AND_B: return std::move(ret) + "and_b(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
+            case NodeType::OR_B: return std::move(ret) + "or_b(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
+            case NodeType::OR_D: return std::move(ret) + "or_d(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
+            case NodeType::OR_C: return std::move(ret) + "or_c(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
+            case NodeType::OR_I: return std::move(ret) + "or_i(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
+            case NodeType::ANDOR:
+                // and_n(X,Y) is syntactic sugar for andor(X,Y,0).
+                if (subs[2]->nodetype == NodeType::JUST_0) return std::move(ret) + "and_n(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
+                return std::move(ret) + "andor(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + "," + subs[2]->MakeString(ctx, success) + ")";
+            case NodeType::MULTI: {
+                auto str = std::move(ret) + "multi(" + std::to_string(k);
+                for (const auto& key : keys) {
+                    std::string key_str;
+                    success &= ctx.ToString(key, key_str);
+                    str += "," + std::move(key_str);
+                }
+                return std::move(str) + ")";
+            }
+            case NodeType::THRESH: {
+                auto str = std::move(ret) + "thresh(" + std::to_string(k);
+                for (const auto& sub : subs) {
+                    str += "," + sub->MakeString(ctx, success);
+                }
+                return std::move(str) + ")";
+            }
+            default: assert(false); // Wrappers should have been handled above
+        }
+        return "";
+    }
+
+    void InitNode(NodeType nt, uint32_t val = 0) { nodetype = nt; k = val; is_blank = false; }
+    void InitNode(NodeType nt, std::vector<std::shared_ptr<NodeBuilder<Key>>> sub, uint32_t val = 0) { nodetype = nt; subs = std::move(sub); k = val; is_blank = false; }
+    void InitNode(NodeType nt, std::vector<std::shared_ptr<NodeBuilder<Key>>> sub, std::vector<unsigned char> arg, uint32_t val = 0) { nodetype = nt; subs = std::move(sub); data = std::move(arg); k = val; is_blank = false; }
+    void InitNode(NodeType nt, std::vector<unsigned char> arg, uint32_t val = 0) { nodetype = nt; data = std::move(arg); k = val; is_blank = false; }
+    void InitNode(NodeType nt, std::vector<std::shared_ptr<NodeBuilder<Key>>> sub, std::vector<Key> key, uint32_t val = 0) { nodetype = nt; keys = std::move(key); subs = std::move(sub); k = val; is_blank = false; }
+    void InitNode(NodeType nt, std::vector<Key> key, uint32_t val = 0) { nodetype = nt; keys = std::move(key); k = val; is_blank = false; }
+
+    void InitNode(std::shared_ptr<NodeBuilder<Key>> node) {
+        nodetype = node->nodetype;
+        subs = std::move(node->subs);
+        keys = std::move(node->keys);
+        data = std::move(node->data);
+        k = node->k;
+        is_blank = false;
+    }
+
+    NodeBuilder() : is_blank(true) {};
+    template<typename... Args>
+    NodeBuilder(Args&&... args) { InitNode(std::forward<Args>(args)...); }
+
+    //! Convert this miniscript to its textual descriptor notation.
+    template<typename Ctx>
+    bool ToString(const Ctx& ctx, std::string& out) const {
+        bool ret = true;
+        out = MakeString(ctx, ret);
+        if (!ret) out = "";
+        return ret;
+    }
+};
+
+//! Construct a miniscript node as a shared_ptr.
+template<typename Key, typename... Args>
+std::shared_ptr<NodeBuilder<Key>> MakeNodeBuilderRef(Args&&... args) { return std::make_shared<NodeBuilder<Key>>(std::forward<Args>(args)...); }
+
 namespace internal {
+
+template<typename Key, typename Ctx>
+inline std::shared_ptr<NodeBuilder<Key>> ParseHelper(Span<const char>& in, const Ctx& ctx) {
+
+    std::vector<std::pair<std::shared_ptr<NodeBuilder<Key>>, Span<const char>>> to_parse;
+
+    // Make a pointer to store where we will make the next Node
+    auto root = MakeNodeBuilderRef<Key>();
+    auto expr = Expr(in);
+    if (in.size()) return {};
+
+    to_parse.push_back(std::make_pair(root, expr));
+
+    while (!to_parse.empty()) {
+
+        auto current_parse = to_parse.back();
+        to_parse.pop_back();
+        
+        expr = current_parse.second;
+
+        // First find the colon to split the wrappers from the expression
+        int colon_index = -1;
+        for (int i = 1; i < expr.size(); ++i) {
+            if (expr[i] == ':') {
+                colon_index = i;
+                break;
+            }
+            if (expr[i] < 'a' || expr[i] > 'z') break;
+        }
+
+        auto sub_node = MakeNodeBuilderRef<Key>();
+        Span<const char> sub_expr;
+
+        if (colon_index != -1) {
+            sub_expr = expr.subspan(colon_index + 1);
+        } else {
+            sub_expr = expr;
+        }
+
+        // Parse the other node types
+        if (sub_expr == Span<const char>("0", 1)) {
+            sub_node->InitNode(NodeType::JUST_0);
+
+        } else if (sub_expr == Span<const char>("1", 1)) {
+            sub_node->InitNode(NodeType::JUST_1);
+
+        } else if (Func("pk", sub_expr)) {
+            Key key;
+            if (ctx.FromString(sub_expr.begin(), sub_expr.end(), key)) {
+                sub_node->InitNode(NodeType::WRAP_C, Vector(MakeNodeBuilderRef<Key>(NodeType::PK_K, Vector(std::move(key)))));
+            }
+
+        } else if (Func("pkh", sub_expr)) {
+            Key key;
+            if (ctx.FromString(sub_expr.begin(), sub_expr.end(), key)) {
+                sub_node->InitNode(NodeType::WRAP_C, Vector(MakeNodeBuilderRef<Key>(NodeType::PK_H, Vector(std::move(key)))));
+            }
+
+        } else if (Func("pk_k", sub_expr)) {
+            Key key;
+            if (ctx.FromString(sub_expr.begin(), sub_expr.end(), key)) {
+                sub_node->InitNode(NodeType::PK_K, Vector(std::move(key)));
+            }
+
+        } else if (Func("pk_h", sub_expr)) {
+            Key key;
+            if (ctx.FromString(sub_expr.begin(), sub_expr.end(), key)) {
+                sub_node->InitNode(NodeType::PK_H, Vector(std::move(key)));
+            }
+
+        } else if (Func("sha256", sub_expr)) {
+            std::string val = std::string(sub_expr.begin(), sub_expr.end());
+            if (!IsHex(val)) return {};
+            auto hash = ParseHex(val);
+            if (hash.size() != 32) return {};
+            sub_node->InitNode(NodeType::SHA256, std::move(hash));
+
+        } else if (Func("ripemd160", sub_expr)) {
+            std::string val = std::string(sub_expr.begin(), sub_expr.end());
+            if (!IsHex(val)) return {};
+            auto hash = ParseHex(val);
+            if (hash.size() != 20) return {};
+            sub_node->InitNode(NodeType::RIPEMD160, std::move(hash));
+
+        } else if (Func("hash256", sub_expr)) {
+            std::string val = std::string(sub_expr.begin(), sub_expr.end());
+            if (!IsHex(val)) return {};
+            auto hash = ParseHex(val);
+            if (hash.size() != 32) return {};
+            sub_node->InitNode(NodeType::HASH256, std::move(hash));
+
+        } else if (Func("hash160", sub_expr)) {
+            std::string val = std::string(sub_expr.begin(), sub_expr.end());
+            if (!IsHex(val)) return {};
+            auto hash = ParseHex(val);
+            if (hash.size() != 20) return {};
+            sub_node->InitNode(NodeType::HASH160, std::move(hash));
+
+        } else if (Func("after", sub_expr)) {
+            int64_t num;
+            if (!ParseInt64(std::string(sub_expr.begin(), sub_expr.end()), &num)) return {};
+            if (num < 1 || num >= 0x80000000L) return {};
+            sub_node->InitNode(NodeType::AFTER, num);
+
+        } else if (Func("older", sub_expr)) {
+            int64_t num;
+            if (!ParseInt64(std::string(sub_expr.begin(), sub_expr.end()), &num)) return {};
+            if (num < 1 || num >= 0x80000000L) return {};
+            sub_node->InitNode(NodeType::OLDER, num);
+
+        } else if (Func("and_n", sub_expr)) {
+            // Process left branch
+            auto left = MakeNodeBuilderRef<Key>();
+            auto left_expr = Expr(sub_expr);
+            to_parse.push_back(std::make_pair(left, left_expr));
+            if (!Const(",", sub_expr)) return {};
+
+            // Process right branch
+            auto right = MakeNodeBuilderRef<Key>();
+            auto right_expr = Expr(sub_expr);
+            to_parse.push_back(std::make_pair(right, right_expr));
+
+            // Combine
+            if (sub_expr.size()) return {};
+            sub_node->InitNode(NodeType::ANDOR, Vector((left), (right), MakeNodeBuilderRef<Key>(NodeType::JUST_0)));
+
+        } else if (Func("andor", sub_expr)) {
+            // Process left branch
+            auto left = MakeNodeBuilderRef<Key>();
+            auto left_expr = Expr(sub_expr);
+            to_parse.push_back(std::make_pair(left, left_expr));
+            if (!Const(",", sub_expr)) return {};
+
+            // Process mid branch
+            auto mid = MakeNodeBuilderRef<Key>();
+            auto mid_expr = Expr(sub_expr);
+            to_parse.push_back(std::make_pair(mid, mid_expr));
+            if (!Const(",", sub_expr)) return {};
+
+            // Process right branch
+            auto right = MakeNodeBuilderRef<Key>();
+            auto right_expr = Expr(sub_expr);
+            to_parse.push_back(std::make_pair(right, right_expr));
+
+            // Combine
+            if (sub_expr.size()) return {};
+            sub_node->InitNode(NodeType::ANDOR, Vector((left), (mid), (right)));
+
+        } else if (Func("multi", sub_expr)) {
+            auto arg = Expr(sub_expr);
+            int64_t count;
+            if (!ParseInt64(std::string(arg.begin(), arg.end()), &count)) return {};
+            std::vector<Key> keys;
+            while (sub_expr.size()) {
+                if (!Const(",", sub_expr)) return {};
+                auto keyarg = Expr(sub_expr);
+                Key key;
+                if (!ctx.FromString(keyarg.begin(), keyarg.end(), key)) return {};
+                keys.push_back(std::move(key));
+            }
+            if (keys.size() < 1 || keys.size() > 20) return {};
+            if (count < 1 || count > (int64_t)keys.size()) return {};
+            sub_node->InitNode(NodeType::MULTI, std::move(keys), count);
+
+        } else if (Func("thresh", sub_expr)) {
+            auto arg = Expr(sub_expr);
+            int64_t count;
+            if (!ParseInt64(std::string(arg.begin(), arg.end()), &count)) return {};
+            std::vector<std::shared_ptr<NodeBuilder<Key>>> subs;
+            while (sub_expr.size()) {
+                if (!Const(",", sub_expr)) return {};
+                auto sub = MakeNodeBuilderRef<Key>();
+                to_parse.push_back(std::make_pair(sub, sub_expr));
+                subs.push_back((sub));
+            }
+            if (count < 1 || count > (int64_t)subs.size()) return {};
+            sub_node->InitNode(NodeType::THRESH, std::move(subs), count);
+
+        } else {
+            NodeType nodetype;
+            if (Func("and_v", sub_expr)) {
+                nodetype = NodeType::AND_V;
+            } else if (Func("and_b", sub_expr)) {
+                nodetype = NodeType::AND_B;
+            } else if (Func("or_c", sub_expr)) {
+                nodetype = NodeType::OR_C;
+            } else if (Func("or_b", sub_expr)) {
+                nodetype = NodeType::OR_B;
+            } else if (Func("or_d", sub_expr)) {
+                nodetype = NodeType::OR_D;
+            } else if (Func("or_i", sub_expr)) {
+                nodetype = NodeType::OR_I;
+            } else {
+                return {};
+            } 
+
+            // Parse left branch
+            auto left = MakeNodeBuilderRef<Key>();
+            auto left_expr = Expr(sub_expr);
+            to_parse.push_back(std::make_pair(left, left_expr));
+            if (!Const(",", sub_expr)) return {};
+
+            // Parse right branch
+            auto right = MakeNodeBuilderRef<Key>();
+            auto right_expr = Expr(sub_expr);
+            to_parse.push_back(std::make_pair(right, right_expr));
+
+            // Combine
+            if (sub_expr.size()) return {};
+            sub_node->InitNode(nodetype, Vector((left), (right)));
+        }
+
+        // Now wrap sub_expr with the wrappers we skipped earlier
+        for (int j = colon_index; j-- > 0; ) {
+            if (expr[j] == 'a') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::WRAP_A, Vector(std::move(sub_node)));
+            } else if (expr[j] == 's') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::WRAP_S, Vector(std::move(sub_node)));
+            } else if (expr[j] == 'c') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::WRAP_C, Vector(std::move(sub_node)));
+            } else if (expr[j] == 'd') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::WRAP_D, Vector(std::move(sub_node)));
+            } else if (expr[j] == 'j') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::WRAP_J, Vector(std::move(sub_node)));
+            } else if (expr[j] == 'n') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::WRAP_N, Vector(std::move(sub_node)));
+            } else if (expr[j] == 'v') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::WRAP_V, Vector(std::move(sub_node)));
+            } else if (expr[j] == 't') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::AND_V, Vector(std::move(sub_node), MakeNodeBuilderRef<Key>(NodeType::JUST_1)));
+            } else if (expr[j] == 'u') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::OR_I, Vector(std::move(sub_node), MakeNodeBuilderRef<Key>(NodeType::JUST_0)));
+            } else if (expr[j] == 'l') {
+                sub_node = MakeNodeBuilderRef<Key>(NodeType::OR_I, Vector(MakeNodeBuilderRef<Key>(NodeType::JUST_0), std::move(sub_node)));
+            } else {
+                // Invalid wrapper
+                return {};
+            }
+        }
+
+        current_parse.first->InitNode(sub_node);
+    }
+    std::cout << "done" << std::endl;
+    // This needs to be built into a real tree
+    return root;
+
+}
+
 
 // Parse(...) is recursive. Recursion depth is limited to MAX_PARSE_RECURSION to avoid
 // running out of stack space at run-time. It is impossible to create a valid Miniscript
@@ -817,6 +1203,7 @@ namespace internal {
 // limit of 201). Those 402 consist of 201 v: wrappers and 201 other nodes. The Parse
 // functions don't use recursion for wrappers, so the recursion limit can be 201.
 static constexpr int MAX_PARSE_RECURSION = 201;
+
 
 //! Parse a miniscript from its textual descriptor form.
 template<typename Key, typename Ctx>
@@ -1219,12 +1606,18 @@ inline NodeRef<Key> DecodeWrapped(I& in, I last, const Ctx& ctx) {
 } // namespace internal
 
 template<typename Ctx>
-inline NodeRef<typename Ctx::Key> FromString(const std::string& str, const Ctx& ctx) {
+inline bool FromString(const std::string& str, const Ctx& ctx, std::string& out) {
     using namespace internal;
     Span<const char> span = MakeSpan(str);
-    auto ret = Parse<typename Ctx::Key>(span, ctx, 0);
-    if (!ret || span.size()) return {};
-    return ret;
+    auto ret = ParseHelper<typename Ctx::Key>(span, ctx);
+    //auto ret = Parse<typename Ctx::Key>(span, ctx, 0);
+    if (ret){
+        return ret->ToString(ctx, out);
+    } else {
+        out = "Error";
+        return false;
+    }
+    //return ret;
 }
 
 template<typename Ctx>
