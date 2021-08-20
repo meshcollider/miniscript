@@ -14,8 +14,6 @@
 #include <stdlib.h>
 #include <assert.h>
 
-#include <iostream>
-
 #include <policy/policy.h>
 #include <script/script.h>
 #include <span.h>
@@ -824,95 +822,6 @@ public:
     std::vector<unsigned char> data;
     std::vector<std::shared_ptr<NodeBuilder<Key>>> subs;
 
-    //! Internal code for ToString.
-    template<typename Ctx>
-    std::string MakeString(const Ctx& ctx, bool& success, bool wrapped = false) const {
-        std::string ret = wrapped ? ":" : "";
-        if (is_blank) return "(blank)";
-
-        switch (nodetype) {
-            case NodeType::WRAP_A: return "a" + subs[0]->MakeString(ctx, success, true);
-            case NodeType::WRAP_S: return "s" + subs[0]->MakeString(ctx, success, true);
-            case NodeType::WRAP_C:
-                if (subs[0]->nodetype == NodeType::PK_K) {
-                    // pk(K) is syntactic sugar for c:pk_k(K)
-                    std::string key_str;
-                    success = ctx.ToString(subs[0]->keys[0], key_str);
-                    return std::move(ret) + "pk(" + std::move(key_str) + ")";
-                }
-                if (subs[0]->nodetype == NodeType::PK_H) {
-                    // pkh(K) is syntactic sugar for c:pk_h(K)
-                    std::string key_str;
-                    success = ctx.ToString(subs[0]->keys[0], key_str);
-                    return std::move(ret) + "pkh(" + std::move(key_str) + ")";
-                }
-                return "c" + subs[0]->MakeString(ctx, success, true);
-            case NodeType::WRAP_D: return "d" + subs[0]->MakeString(ctx, success, true);
-            case NodeType::WRAP_V: return "v" + subs[0]->MakeString(ctx, success, true);
-            case NodeType::WRAP_J: return "j" + subs[0]->MakeString(ctx, success, true);
-            case NodeType::WRAP_N: return "n" + subs[0]->MakeString(ctx, success, true);
-            case NodeType::AND_V:
-                // t:X is syntactic sugar for and_v(X,1).
-                if (subs[1]->nodetype == NodeType::JUST_1) return "t" + subs[0]->MakeString(ctx, success, true);
-                break;
-            case NodeType::OR_I:
-                if (subs[0]->nodetype == NodeType::JUST_0) return "l" + subs[1]->MakeString(ctx, success, true);
-                if (subs[1]->nodetype == NodeType::JUST_0) return "u" + subs[0]->MakeString(ctx, success, true);
-                break;
-            default:
-                break;
-        }
-
-        switch (nodetype) {
-            case NodeType::PK_K: {
-                std::string key_str;
-                success = ctx.ToString(keys[0], key_str);
-                return std::move(ret) + "pk_k(" + std::move(key_str) + ")";
-            }
-            case NodeType::PK_H: {
-                std::string key_str;
-                success = ctx.ToString(keys[0], key_str);
-                return std::move(ret) + "pk_h(" + std::move(key_str) + ")";
-            }
-            case NodeType::AFTER: return std::move(ret) + "after(" + std::to_string(k) + ")";
-            case NodeType::OLDER: return std::move(ret) + "older(" + std::to_string(k) + ")";
-            case NodeType::HASH256: return std::move(ret) + "hash256(" + HexStr(data.begin(), data.end()) + ")";
-            case NodeType::HASH160: return std::move(ret) + "hash160(" + HexStr(data.begin(), data.end()) + ")";
-            case NodeType::SHA256: return std::move(ret) + "sha256(" + HexStr(data.begin(), data.end()) + ")";
-            case NodeType::RIPEMD160: return std::move(ret) + "ripemd160(" + HexStr(data.begin(), data.end()) + ")";
-            case NodeType::JUST_1: return std::move(ret) + "1";
-            case NodeType::JUST_0: return std::move(ret) + "0";
-            case NodeType::AND_V: return std::move(ret) + "and_v(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
-            case NodeType::AND_B: return std::move(ret) + "and_b(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
-            case NodeType::OR_B: return std::move(ret) + "or_b(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
-            case NodeType::OR_D: return std::move(ret) + "or_d(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
-            case NodeType::OR_C: return std::move(ret) + "or_c(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
-            case NodeType::OR_I: return std::move(ret) + "or_i(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
-            case NodeType::ANDOR:
-                // and_n(X,Y) is syntactic sugar for andor(X,Y,0).
-                if (subs[2]->nodetype == NodeType::JUST_0) return std::move(ret) + "and_n(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
-                return std::move(ret) + "andor(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + "," + subs[2]->MakeString(ctx, success) + ")";
-            case NodeType::MULTI: {
-                auto str = std::move(ret) + "multi(" + std::to_string(k);
-                for (const auto& key : keys) {
-                    std::string key_str;
-                    success &= ctx.ToString(key, key_str);
-                    str += "," + std::move(key_str);
-                }
-                return std::move(str) + ")";
-            }
-            case NodeType::THRESH: {
-                auto str = std::move(ret) + "thresh(" + std::to_string(k);
-                for (const auto& sub : subs) {
-                    str += "," + sub->MakeString(ctx, success);
-                }
-                return std::move(str) + ")";
-            }
-            default: assert(false); // Wrappers should have been handled above
-        }
-        return "";
-    }
-
     void InitNode(NodeType nt, uint32_t val = 0) { nodetype = nt; k = val; is_blank = false; }
     void InitNode(NodeType nt, std::vector<std::shared_ptr<NodeBuilder<Key>>> sub, uint32_t val = 0) { nodetype = nt; subs = std::move(sub); k = val; is_blank = false; }
     void InitNode(NodeType nt, std::vector<std::shared_ptr<NodeBuilder<Key>>> sub, std::vector<unsigned char> arg, uint32_t val = 0) { nodetype = nt; subs = std::move(sub); data = std::move(arg); k = val; is_blank = false; }
@@ -932,15 +841,6 @@ public:
     NodeBuilder() : is_blank(true) {};
     template<typename... Args>
     NodeBuilder(Args&&... args) { InitNode(std::forward<Args>(args)...); }
-
-    //! Convert this miniscript to its textual descriptor notation.
-    template<typename Ctx>
-    bool ToString(const Ctx& ctx, std::string& out) const {
-        bool ret = true;
-        out = MakeString(ctx, ret);
-        if (!ret) out = "";
-        return ret;
-    }
 };
 
 //! Construct a miniscript node as a shared_ptr.
@@ -965,7 +865,7 @@ inline std::shared_ptr<NodeBuilder<Key>> ParseHelper(Span<const char>& in, const
 
         auto current_parse = to_parse.back();
         to_parse.pop_back();
-        
+
         expr = current_parse.second;
 
         // First find the colon to split the wrappers from the expression
@@ -1190,10 +1090,9 @@ inline std::shared_ptr<NodeBuilder<Key>> ParseHelper(Span<const char>& in, const
 
         current_parse.first->InitNode(sub_node);
     }
-    std::cout << "done" << std::endl;
+
     // This needs to be built into a real tree
     return root;
-
 }
 
 
@@ -1203,7 +1102,6 @@ inline std::shared_ptr<NodeBuilder<Key>> ParseHelper(Span<const char>& in, const
 // limit of 201). Those 402 consist of 201 v: wrappers and 201 other nodes. The Parse
 // functions don't use recursion for wrappers, so the recursion limit can be 201.
 static constexpr int MAX_PARSE_RECURSION = 201;
-
 
 //! Parse a miniscript from its textual descriptor form.
 template<typename Key, typename Ctx>
@@ -1606,18 +1504,12 @@ inline NodeRef<Key> DecodeWrapped(I& in, I last, const Ctx& ctx) {
 } // namespace internal
 
 template<typename Ctx>
-inline bool FromString(const std::string& str, const Ctx& ctx, std::string& out) {
+inline NodeRef<typename Ctx::Key> FromString(const std::string& str, const Ctx& ctx) {
     using namespace internal;
     Span<const char> span = MakeSpan(str);
-    auto ret = ParseHelper<typename Ctx::Key>(span, ctx);
-    //auto ret = Parse<typename Ctx::Key>(span, ctx, 0);
-    if (ret){
-        return ret->ToString(ctx, out);
-    } else {
-        out = "Error";
-        return false;
-    }
-    //return ret;
+    auto ret = Parse<typename Ctx::Key>(span, ctx, 0);
+    if (!ret || span.size()) return {};
+    return ret;
 }
 
 template<typename Ctx>
