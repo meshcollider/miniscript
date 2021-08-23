@@ -964,7 +964,7 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx) {
                 auto s = Expr(sub_expr);
                 sub_exprs.push_back(s);
             }
-            
+
             if (count < 1 || count > (int64_t)sub_exprs.size()) return {};
 
             if (children.size() != sub_exprs.size()) {
@@ -976,7 +976,7 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx) {
             } else {
                 // Children are constructed in reverse order, so iterate from end to beginning
                 std::vector<NodeRef<Key>> subs;
-                for (auto i = children.rbegin(); i != children.rend(); ++i ) { 
+                for (auto i = children.rbegin(); i != children.rend(); ++i ) {
                     subs.push_back(std::move(constructed[*i]));
                 }
                 node = MakeNodeRef<Key>(NodeType::THRESH, std::move(subs), count);
