@@ -1256,6 +1256,21 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // ========= DEAL WITH WRAPPERS =========
         // ======================================
 
+        if (last - in <= 1 || in[0].first == OP_TOALTSTACK) {
+            NodeType parent_context = context;
+            int current_parent = this_parent;
+            while (context != NodeType::WRAP_A) {
+                if (current_parent == -1) return {};
+                // Get the context of our current parent
+                parent_context = std::get<2>(to_parse[current_parent]);
+                // Get the parent ID of our current parent
+                current_parent = std::get<3>(to_parse[current_parent]);
+            }
+            // TODO: We have found the closest parent for the WRAP_A context
+            // TODO: now all the children should be constructed into AND_V as a child of WRAP_A
+        }
+        // TODO: do the same with OP_SWAP
+
         // TODO: this is wrong because inside a: and s: we can have multi (and_v)
         // If we are in an a: wrapper, make sure we have the matching OP_TOALTSTACK
         if (context == NodeType::WRAP_A) {
@@ -1276,8 +1291,11 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // We treat following subscripts as children of this one, because
         // if they aren't used, they'll be passed back up anyway to the parent
         if (children.empty() && last > in) {
-            if 
-            to_parse.emplace_back(in, last, contect, this_index, vector<int>());
+            int next_parent = this_parent;
+            if (next_parent == -1 || context != NodeType::AND_V) {
+                next_parent = this_index;
+            }
+            to_parse.emplace_back(in, last, NodeType::AND_V, next_parent, vector<int>());
             continue;
         }
 
