@@ -1098,11 +1098,16 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         std::vector<int>& children = std::get<4>(to_parse.back());
         int this_index = to_parse.size() - 1;
 
+        // We should never have pushed an empty expression to the to-parse stack
         if (in == last) return {};
 
         NodeRef<Key> node;
 
         // Process this one. If there is more after that, add that to the to-parse list with the same parent.
+
+        // ===================================================
+        // ========= PROCESS SINGLE WITH NO CHILDREN =========
+        // ===================================================
         if (last > in && in[0].first == OP_1) {
             ++in;
             node = MakeNodeRef<Key>(NodeType::JUST_1);
@@ -1149,7 +1154,6 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
             in += 7;
             node = MakeNodeRef<Key>(NodeType::HASH160, in[-6].second);
         }
-
         else if (last - in >= 3 && in[0].first == OP_CHECKMULTISIG) {
             std::vector<Key> keys;
             int64_t n;
@@ -1169,9 +1173,45 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
             node = MakeNodeRef<Key>(NodeType::MULTI, std::move(keys), k);
         }
 
+        // ===============================================
+        // ========= SINGLE WRAPPERS C, V, and N =========
+        // ===============================================
+
+        else if (last - in >= 2 && in[0].first == OP_CHECKSIG) {
+            if (children.empty()) {
+                to_parse.emplace_back(in+1, last, NodeType::WRAP_C, this_index, vector<int>());
+                continue;
+            } else {
+                node = MakeNodeRef<Key>(NodeType::WRAP_C, Vector(std::move(constructed[children.at(0)])));
+                children.erase(children.begin(), children.begin()+1);
+            }
+        }
+        else if (last - in >= 2 && in[0].first == OP_VERIFY) {
+            if (children.empty()) {
+                to_parse.emplace_back(in+1, last, NodeType::WRAP_V, this_index, vector<int>());
+                continue;
+            } else {
+                node = MakeNodeRef<Key>(NodeType::WRAP_V, Vector(std::move(constructed[children.at(0)])));
+                children.erase(children.begin(), children.begin()+1);
+            }
+        }
+        else if (last - in >= 2 && in[0].first == OP_0NOTEQUAL) {
+            if (children.empty()) {
+                to_parse.emplace_back(in+1, last, NodeType::WRAP_N, this_index, vector<int>());
+                continue;
+            } else {
+                node = MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(constructed[children.at(0)])));
+                children.erase(children.begin(), children.begin()+1);
+            }
+        }
+
+        // ====================================================================
+        // ========= PROCESS BOOL-TYPE WITH TWO CHILDREN (W + SINGLE) =========
+        // ====================================================================
+
         // and_b and or_b should both have a wrapped (type W) child followed by a single child
         else if (last - in >= 3 && in[0].first == OP_BOOLAND) {
-            if (children.size() != 2){
+            if (children.empty()){
                 // Both of these should be processed as "multi" like the root node, but expect a single following it.
                 if (in[0].first == OP_FROMALTSTACK) {
                     to_parse.emplace_back(in+1, last, NodeType::WRAP_A, this_index, vector<int>());
@@ -1179,12 +1219,16 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
                     to_parse.emplace_back(in+1, last, NodeType::WRAP_S, this_index, vector<int>());
                 }
                 continue;
-            } else {
+            } else if (chilren.size() >= 2) {
                 node = MakeNodeRef<Key>(NodeType::AND_B, Vector(std::move(constructed[children.at(0)]), std::move(constructed[children.at(1)])));
+                children.erase(children.begin(), children.begin()+2);
+            } else {
+                // If we get back here with insufficient children, fail
+                return {};
             }
         }
         else if (last - in >= 3 && in[0].first == OP_BOOLOR) {
-            if (children.size() != 2){
+            if (children.empty()) {
                 // Both of these should be processed as "multi" like the root node, but expect a single following it.
                 if (in[0].first == OP_FROMALTSTACK) {
                     to_parse.emplace_back(in+1, last, NodeType::WRAP_A, this_index, vector<int>());
@@ -1192,10 +1236,23 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
                     to_parse.emplace_back(in+1, last, NodeType::WRAP_S, this_index, vector<int>());
                 }
                 continue;
-            } else {
+            } else if (children.size() >= 2) {
                 node = MakeNodeRef<Key>(NodeType::OR_B, Vector(std::move(constructed[children.at(0)]), std::move(constructed[children.at(1)])));
+                children.erase(children.begin(), children.begin()+2);
+            } else {
+                return {};
             }
         }
+
+        // ====================================================================
+        // ========= THRESH and the complicated AND_* and OR_* expressions =========
+        // ====================================================================
+
+        // TODO
+
+        // ======================================
+        // ========= DEAL WITH WRAPPERS =========
+        // ======================================
 
         // If we are in an a: wrapper, make sure we have the matching OP_TOALTSTACK
         if (context == NodeType::WRAP_A) {
@@ -1207,50 +1264,49 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
             in++;
         }
 
-        // If there is still more script to parse, add it to the to-parse list
-        // Note that if we are in WRAP_A or WRAP_S, there must be another expression following.
-        // We treat this sub-expression as being an AND_V wrapper.
-        if (last > in) to_parse.emplace_back(in, last, NodeType::AND_V, this_parent, vector<int>());
 
-        //TODO: check for != OP_ELSE && != OP_IF && != OP_NOTIF && != OP_TOALTSTACK && != OP_SWAP
-        // We must have already constructed the children and arrived back at the parent, so we should have
-        // all the children we need (or we fail)
-        } else {
-            if (context == NodeType::AND_V) {
-                NodeRef<Key> sub = constructed[children.at(0)];
-                if (children.size() == 1) {
-                    // AND_V with a single child is a no-op, continue
-                    // add this location to parent's children list
-                    // if parent_id == -1, return this.
-                } else {
-                    for (int i = 1; i < children.size(); i++) {
-                        sub = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(constructed[children.at(i)]), std::move(sub)));
-                    }
-                    // add this location to parent's children list
-                }
-            }
-            to_parse.pop_back();
+        // ================================================================
+        // ========= ENSURE WE HAVE PROCESSED THE WHOLE SUBSCRIPT =========
+        // ================================================================
+
+        // We treat following subscripts as children of this one, because
+        // if they aren't used, they'll be passed back up anyway to the parent
+        if (children.empty() && last > in) {
+            to_parse.emplace_back(in, last, contect, this_index, vector<int>());
+            continue;
         }
 
+        // ===============================================
+        // ========= DEAL WITH LEFTOVER CHILDREN =========
+        // ===============================================
+
+        // If we reach this point, we have constructed a node successfully.
+        // If we still have remaining children, they must belong to a higher parent or an AND_V
+        std::vector<int>& parent_children = std::get<4>(to_parse[this_parent]);
+
+        // AND_V has scripts of the form [X] [Y], so we just combine any leftover children into such miniscripts.
+        if (context == NodeType::AND_V) {
+            //TODO: check for != OP_ELSE && != OP_IF && != OP_NOTIF && != OP_TOALTSTACK && != OP_SWAP
+            for (int i = children.size()-1; i >= 0; --i) {
+                node = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(constructed[children.at(i)]), std::move(node)));
+            }
+            children.clear();
+        }
+
+        // pass remaining children up to the parent's children list (siblings), and from now on, set remainder to have the upper parent.
+        for (child : children) {
+            parent_children.push_back(child);
+        }
 
         // We've successfully constructed this node now, so remove it from the parse list.
-        constructed.push_back(std::move(node));
-        //TODO: add to parent's child list
-        //std::vector<int>& parent_children = std::get<2>(to_parse[this_parent]);
-        //parent_children.push_back(constructed.size()-1);
-        to_parse.pop_back();
 
-        // If we haven't reached the end, this must be an and_v expression.
-        // We've already constructed the first child, so we push the parent and the other child to the to-parse stack
-        if (start != end && in[0].first != OP_ELSE && in[0].first != OP_IF && in[0].first != OP_NOTIF && in[0].first != OP_TOALTSTACK && in[0].first != OP_SWAP) {
-            to_parse.emplace_back(start, end, -1 /*TODO*/, vector<int>{constructed.size()-1});
-            auto sub2 = DecodeSingle<Key>(in, last, ctx);
-            if (!sub2) return {};
-            sub = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(sub2), std::move(sub)));
+        if (this_parent == -1) {
+            return node;
         }
-        return sub;
+        constructed.push_back(std::move(node));
+        parent_children.push_back(constructed.size()-1);
+        to_parse.pop_back();
     }
-
     return {};
 
 }
