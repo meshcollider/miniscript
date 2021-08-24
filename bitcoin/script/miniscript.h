@@ -1077,20 +1077,6 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
     to_parse.emplace_back(start, end, NodeType::AND_V, -1, std::vector<int>());
 
     while (!to_parse.empty()) {
-        
-        // Unlike Parse, where we get a specific expression to parse,
-        // here we will get a subscript that will consist of all siblings.
-
-        // For JUST_*, JUST_1, PK_*, OLDER, AFTER, the HASH... functions, and MULTI,
-        // we simply construct a node directly with no children.
-        //
-        // For and_b, or_b (BOOLAND and BOOLOR), we have two children - a wrapped and a single.
-        //
-        // For c, v, and n wrappers we have a single child.
-        //
-        // If we have OP_EQUAL, we have thresh. Multiple sub expressions starting with OP_ADD,
-        // followed by a single to end.
-
         I in = std::get<0>(to_parse.back());
         I last = std::get<1>(to_parse.back());
         NodeType context = std::get<2>(to_parse.back());
@@ -1102,8 +1088,6 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         if (in == last) return {};
 
         NodeRef<Key> node;
-
-        // Process this one. If there is more after that, add that to the to-parse list with the same parent.
 
         // ===================================================
         // ========= PROCESS SINGLE WITH NO CHILDREN =========
@@ -1177,31 +1161,36 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // ========= SINGLE WRAPPERS C, V, and N =========
         // ===============================================
 
+        // Note these op codes only affect the last term in an and_v for example, so we can assume a single follows it
+        // wlog, since v:and_v(X, Y) = and_v(X, v:Y)
         else if (last - in >= 2 && in[0].first == OP_CHECKSIG) {
+            ++in;
             if (children.empty()) {
-                to_parse.emplace_back(in+1, last, NodeType::WRAP_C, this_index, vector<int>());
+                to_parse.emplace_back(in, last, NodeType::WRAP_C, this_index, vector<int>());
                 continue;
             } else {
                 node = MakeNodeRef<Key>(NodeType::WRAP_C, Vector(std::move(constructed[children.at(0)])));
-                children.erase(children.begin(), children.begin()+1);
+                children.erase(children.begin());
             }
         }
         else if (last - in >= 2 && in[0].first == OP_VERIFY) {
+            ++in;
             if (children.empty()) {
-                to_parse.emplace_back(in+1, last, NodeType::WRAP_V, this_index, vector<int>());
+                to_parse.emplace_back(in, last, NodeType::WRAP_V, this_index, vector<int>());
                 continue;
             } else {
                 node = MakeNodeRef<Key>(NodeType::WRAP_V, Vector(std::move(constructed[children.at(0)])));
-                children.erase(children.begin(), children.begin()+1);
+                children.erase(children.begin());
             }
         }
         else if (last - in >= 2 && in[0].first == OP_0NOTEQUAL) {
+            ++in;
             if (children.empty()) {
-                to_parse.emplace_back(in+1, last, NodeType::WRAP_N, this_index, vector<int>());
+                to_parse.emplace_back(in, last, NodeType::WRAP_N, this_index, vector<int>());
                 continue;
             } else {
                 node = MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(constructed[children.at(0)])));
-                children.erase(children.begin(), children.begin()+1);
+                children.erase(children.begin());
             }
         }
 
@@ -1210,16 +1199,20 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // ====================================================================
 
         // and_b and or_b should both have a wrapped (type W) child followed by a single child
+
+        // or_b(X,Z) / and_b(X,Z)	X is B; Z is W
+
         else if (last - in >= 3 && in[0].first == OP_BOOLAND) {
+            ++in;
             if (children.empty()){
                 // Both of these should be processed as "multi" like the root node, but expect a single following it.
                 if (in[0].first == OP_FROMALTSTACK) {
-                    to_parse.emplace_back(in+1, last, NodeType::WRAP_A, this_index, vector<int>());
+                    to_parse.emplace_back(in, last, NodeType::WRAP_A, this_index, vector<int>());
                 } else {
-                    to_parse.emplace_back(in+1, last, NodeType::WRAP_S, this_index, vector<int>());
+                    to_parse.emplace_back(in, last, NodeType::WRAP_S, this_index, vector<int>());
                 }
                 continue;
-            } else if (chilren.size() >= 2) {
+            } else if (children.size() >= 2) {
                 node = MakeNodeRef<Key>(NodeType::AND_B, Vector(std::move(constructed[children.at(0)]), std::move(constructed[children.at(1)])));
                 children.erase(children.begin(), children.begin()+2);
             } else {
@@ -1228,12 +1221,13 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
             }
         }
         else if (last - in >= 3 && in[0].first == OP_BOOLOR) {
+            ++in;
             if (children.empty()) {
                 // Both of these should be processed as "multi" like the root node, but expect a single following it.
                 if (in[0].first == OP_FROMALTSTACK) {
-                    to_parse.emplace_back(in+1, last, NodeType::WRAP_A, this_index, vector<int>());
+                    to_parse.emplace_back(in, last, NodeType::WRAP_A, this_index, vector<int>());
                 } else {
-                    to_parse.emplace_back(in+1, last, NodeType::WRAP_S, this_index, vector<int>());
+                    to_parse.emplace_back(in, last, NodeType::WRAP_S, this_index, vector<int>());
                 }
                 continue;
             } else if (children.size() >= 2) {
@@ -1248,12 +1242,21 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // ========= THRESH and the complicated AND_* and OR_* expressions =========
         // ====================================================================
 
+        // IF [X] ENDIF can by WRAP_J or WRAP_D depending on what follows
+
+        // [X] NOTIF [Z] ELSE [Y] ENDIF is ANDOR
+
+        // NOTIF [Z] ENDIF can be OR_C or OR_D depending on what follows
+
+        // IF [X] ELSE [Z] ENDIF is OR_I
+
         // TODO
 
         // ======================================
         // ========= DEAL WITH WRAPPERS =========
         // ======================================
 
+        // TODO: this is wrong because inside a: and s: we can have multi (and_v)
         // If we are in an a: wrapper, make sure we have the matching OP_TOALTSTACK
         if (context == NodeType::WRAP_A) {
             if (last - in <= 1 || in[0].first != OP_TOALTSTACK) return {};
@@ -1263,6 +1266,7 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
             if (last - in <= 1 || in[0].first != OP_SWAP) return {};
             in++;
         }
+        // TODO: Then following WRAP_A or WRAP_S there should be a single expression
 
 
         // ================================================================
@@ -1272,6 +1276,7 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // We treat following subscripts as children of this one, because
         // if they aren't used, they'll be passed back up anyway to the parent
         if (children.empty() && last > in) {
+            if 
             to_parse.emplace_back(in, last, contect, this_index, vector<int>());
             continue;
         }
@@ -1285,7 +1290,7 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         std::vector<int>& parent_children = std::get<4>(to_parse[this_parent]);
 
         // AND_V has scripts of the form [X] [Y], so we just combine any leftover children into such miniscripts.
-        if (context == NodeType::AND_V) {
+        if (context == NodeType::AND_V) { // TODO: Or WRAP_A or WRAP_S
             //TODO: check for != OP_ELSE && != OP_IF && != OP_NOTIF && != OP_TOALTSTACK && != OP_SWAP
             for (int i = children.size()-1; i >= 0; --i) {
                 node = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(constructed[children.at(i)]), std::move(node)));
