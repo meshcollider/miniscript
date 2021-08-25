@@ -1074,9 +1074,13 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
     std::vector<NodeRef<Key>> constructed;
 
     // The root node context is AND_V because it may be made up of multiple sub-expressions
-    to_parse.emplace_back(start, end, NodeType::AND_V, -1, std::vector<int>());
+    // We push a special empty parent to deal with this, so all the AND_V children can be stored
+    to_parse.emplace_back(start, start, NodeType::AND_V, -1, std::vector<int>());
+    // Then we push the actual expression
+    to_parse.emplace_back(start, end, NodeType::AND_V, 0, std::vector<int>());
 
     while (!to_parse.empty()) {
+        // Decompose the current to-parse tuple (we always process the last in the stack)
         I in = std::get<0>(to_parse.back());
         I last = std::get<1>(to_parse.back());
         NodeType context = std::get<2>(to_parse.back());
@@ -1084,15 +1088,29 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         std::vector<int>& children = std::get<4>(to_parse.back());
         int this_index = to_parse.size() - 1;
 
-        // We should never have pushed an empty expression to the to-parse stack
-        if (in == last) return {};
-
+        // node to be constructed
         NodeRef<Key> node;
+
+        // If the expression is empty, it is probably a parent AND_V node.
+        if (in == last) {
+            // Otherwise something went wrong (e.g. empty brackets).
+            if (context != NodeType::AND_V) return {};
+            
+            // AND_V should have at least one child
+            if (children.empty()) return {};
+
+            // Build the AND_V expression from the children
+            node = std::move(constructed[i]);
+            for (int i = 1; i < children.size(); ++i) {
+                node = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(constructed[children.at(i)]), std::move(node)));
+            }
+            // TODO: deal with extra children (children.clear()?)
+        }
 
         // ===================================================
         // ========= PROCESS SINGLE WITH NO CHILDREN =========
         // ===================================================
-        if (last > in && in[0].first == OP_1) {
+        else if (last > in && in[0].first == OP_1) {
             ++in;
             node = MakeNodeRef<Key>(NodeType::JUST_1);
         }
@@ -1161,6 +1179,8 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // ========= SINGLE WRAPPERS C, V, and N =========
         // ===============================================
 
+        // TODO: move the !children.empty() cases earlier
+        // TODO: deal with extra children
         // Note these op codes only affect the last term in an and_v for example, so we can assume a single follows it
         // wlog, since v:and_v(X, Y) = and_v(X, v:Y)
         else if (last - in >= 2 && in[0].first == OP_CHECKSIG) {
@@ -1211,9 +1231,14 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
                 } else {
                     to_parse.emplace_back(in, last, NodeType::WRAP_S, this_index, vector<int>());
                 }
+                ++in;
+                // There may be an implicit AND_V wrapper here so we push an empty parent first
+                to_parse.emplace_back(in, in, NodeType::AND_V, this_index+1, vector<int>());
+                to_parse.emplace_back(in, last, NodeType::AND_V, this_index+2, vector<int>());
                 continue;
             } else if (children.size() >= 2) {
                 node = MakeNodeRef<Key>(NodeType::AND_B, Vector(std::move(constructed[children.at(0)]), std::move(constructed[children.at(1)])));
+                // TODO: deal with extra children
                 children.erase(children.begin(), children.begin()+2);
             } else {
                 // If we get back here with insufficient children, fail
@@ -1229,9 +1254,14 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
                 } else {
                     to_parse.emplace_back(in, last, NodeType::WRAP_S, this_index, vector<int>());
                 }
+                ++in;
+                // There may be an implicit AND_V wrapper here so we push an empty parent first
+                to_parse.emplace_back(in, in, NodeType::AND_V, this_index+1, vector<int>());
+                to_parse.emplace_back(in, last, NodeType::AND_V, this_index+2, vector<int>());
                 continue;
             } else if (children.size() >= 2) {
                 node = MakeNodeRef<Key>(NodeType::OR_B, Vector(std::move(constructed[children.at(0)]), std::move(constructed[children.at(1)])));
+                // TODO: deal with extra children
                 children.erase(children.begin(), children.begin()+2);
             } else {
                 return {};
@@ -1307,14 +1337,7 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // If we still have remaining children, they must belong to a higher parent or an AND_V
         std::vector<int>& parent_children = std::get<4>(to_parse[this_parent]);
 
-        // AND_V has scripts of the form [X] [Y], so we just combine any leftover children into such miniscripts.
-        if (context == NodeType::AND_V) { // TODO: Or WRAP_A or WRAP_S
-            //TODO: check for != OP_ELSE && != OP_IF && != OP_NOTIF && != OP_TOALTSTACK && != OP_SWAP
-            for (int i = children.size()-1; i >= 0; --i) {
-                node = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(constructed[children.at(i)]), std::move(node)));
-            }
-            children.clear();
-        }
+        
 
         // pass remaining children up to the parent's children list (siblings), and from now on, set remainder to have the upper parent.
         for (child : children) {
