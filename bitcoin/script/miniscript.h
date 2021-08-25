@@ -1083,6 +1083,7 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // Decompose the current to-parse tuple (we always process the last in the stack)
         I in = std::get<0>(to_parse.back());
         I last = std::get<1>(to_parse.back());
+        if (in > last) return {};
         NodeType context = std::get<2>(to_parse.back());
         int this_parent = std::get<3>(to_parse.back());
         std::vector<int>& children = std::get<4>(to_parse.back());
@@ -1091,9 +1092,9 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         // node to be constructed
         NodeRef<Key> node;
 
-        // If the expression is empty, it is probably a parent AND_V node.
+        // We never push an empty subexpression onto the stack unless it is an implicit AND_V parent.
         if (in == last) {
-            // Otherwise something went wrong (e.g. empty brackets).
+            // If not, something is invalid (e.g. empty brackets).
             if (context != NodeType::AND_V) return {};
             
             // AND_V should have at least one child
@@ -1105,6 +1106,22 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
                 node = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(constructed[children.at(i)]), std::move(node)));
             }
             // TODO: deal with extra children (children.clear()?)
+        }
+
+        // TODO: pass up to the closest starting environment for these expressions
+        else if (in[0].second == OP_IF || in[0].second == OP_ELSE || in[0].second == OP_NOTIF) {
+
+        }
+        // TODO: WRAP_S and WRAP_A
+        else if (in[0].second == OP_TOALTSTACK || in[0].second == OP_SWAP) {
+
+        }
+        // TODO: THRESH
+        else if (last - in >= 2 && in[0].first == OP_ADD) {
+            ++in;
+            auto sub = DecodeWrapped<Key>(in, last, ctx);
+            if (!sub) return {};
+            subs.push_back(std::move(sub));
         }
 
         // ===================================================
@@ -1269,7 +1286,7 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
         }
 
         // ====================================================================
-        // ========= THRESH and the complicated AND_* and OR_* expressions =========
+        // ========= Complicated AND_* and OR_* expressions =========
         // ====================================================================
 
         // IF [X] ENDIF can by WRAP_J or WRAP_D depending on what follows
@@ -1280,7 +1297,87 @@ inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
 
         // IF [X] ELSE [Z] ENDIF is OR_I
 
-        // TODO
+        else if (last - in >= 3 && in[0].first == OP_ENDIF) {
+            to_parse.emplace_back(in, last, NodeType::ANDOR, this_index, vector<int>());
+            ++in;
+            // There may be an implicit AND_V wrapper here so we push an empty parent first
+            to_parse.emplace_back(in, in, NodeType::AND_V, this_index+1, vector<int>());
+            to_parse.emplace_back(in, last, NodeType::AND_V, this_index+2, vector<int>());
+
+
+
+            NodeRef<Key> sub1;
+            sub1 = DecodeMulti<Key>(in, last, ctx);
+            if (!sub1) return {};
+            bool have_else = false;
+            NodeRef<Key> sub2;
+            if (last - in == 0) return {};
+            if (in[0].first == OP_ELSE) {
+                ++in;
+                have_else = true;
+                sub2 = DecodeMulti<Key>(in, last, ctx);
+                if (!sub2) return {};
+            }
+            if (last - in == 0 || (in[0].first != OP_IF && in[0].first != OP_NOTIF)) return {};
+            bool negated = (in[0].first == OP_NOTIF);
+            ++in;
+
+            if (!have_else && !negated) {
+                if (last > in && in[0].first == OP_DUP) {
+                    ++in;
+                    return MakeNodeRef<Key>(NodeType::WRAP_D, Vector(std::move(sub1)));
+                }
+                if (last - in >= 2 && in[0].first == OP_0NOTEQUAL && in[1].first == OP_SIZE) {
+                    in += 2;
+                    return MakeNodeRef<Key>(NodeType::WRAP_J, Vector(std::move(sub1)));
+                }
+                return {};
+            }
+            if (have_else && negated) {
+                auto sub3 = DecodeSingle<Key>(in, last, ctx);
+                if (!sub3) return {};
+                return MakeNodeRef<Key>(NodeType::ANDOR, Vector(std::move(sub3), std::move(sub1), std::move(sub2)));
+            }
+            if (!have_else && negated) {
+                if (last - in >= 2 && in[0].first == OP_IFDUP) {
+                    ++in;
+                    auto sub3 = DecodeSingle<Key>(in, last, ctx);
+                    if (!sub3) return {};
+                    return MakeNodeRef<Key>(NodeType::OR_D, Vector(std::move(sub3), std::move(sub1)));
+                }
+                if (last > in) {
+                    auto sub3 = DecodeSingle<Key>(in, last, ctx);
+                    if (!sub3) return {};
+                    return MakeNodeRef<Key>(NodeType::OR_C, Vector(std::move(sub3), std::move(sub1)));
+                }
+                return {};
+            }
+            if (have_else && !negated) {
+                return MakeNodeRef<Key>(NodeType::OR_I, Vector(std::move(sub2), std::move(sub1)));
+            }
+            return {};
+        }
+
+        // ====================================================================
+        // ========= THRESH  =========
+        // ====================================================================
+
+        else if (last - in >= 3 && in[0].first == OP_EQUAL && ParseScriptNumber(in[1], k)) {
+            if (k < 1) return {};
+            in += 2;
+            if (children.empty()) {
+                to_parse.emplace_back(in, last, NodeType::THRESH, this_index, vector<int>());
+                continue;
+            } else if (children.size() >= static_cast<unsigned int>(k)) {
+                std::vector<NodeRef<Key>> subs;
+                for (i : children) {
+                    subs.push_back(std::move(constructed[i]));
+                }
+                node = MakeNodeRef<Key>(NodeType::THRESH, std::move(subs), k);
+            } else {
+                return {};
+            }
+        }
 
         // ======================================
         // ========= DEAL WITH WRAPPERS =========
