@@ -1101,7 +1101,7 @@ enum class DecodeContext {
 template<typename Key, typename Ctx, typename I>
 inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
     // The two integers are used to hold state for thresh()
-    std::vector<DecodeContext, int64_t, int64_t> to_parse;
+    std::vector<std::tuple<DecodeContext, int64_t, int64_t>> to_parse;
     std::vector<NodeRef<Key>> constructed;
 
     // There may be implicit and_v expressions [X] [Y] or s: wrapper SWAP [X]
@@ -1118,7 +1118,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
         to_parse.pop_back();
 
         switch(cur_context) {
-        case DecodeContext::Expression:
+        case DecodeContext::Expression: {
             if (in >= last) return {};
 
             // Constants
@@ -1261,14 +1261,16 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
             }
 
             break;
-        case DecodeContext::MaybeAndV:
+        }
+        case DecodeContext::MaybeAndV: {
             // If we reach a potential AND_V top-level, check if the next part of the script could be another AND_V child
             if (in < last && in[0].first != OP_IF && in[0].first != OP_ELSE && in[0].first != OP_ENDIF && in[0].first != OP_TOALTSTACK && in[0].first != OP_SWAP) {
-                to_parse.emplace_back(DecodeContext::AND_V, -1, -1);
+                to_parse.emplace_back(DecodeContext::AndV, -1, -1);
                 to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             }
             break;
-        case DecodeContext::MaybeSwap:
+        }
+        case DecodeContext::MaybeSwap: {
             if (in < last && in[0].first == OP_SWAP) {
                 ++in;
                 NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_S, Vector(std::move(constructed.back())));
@@ -1277,41 +1279,48 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
                 to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
             }
             break;
-        case DecodeContext::Alt:
+        }
+        case DecodeContext::Alt: {
             if (in >= last || in[0].first != OP_TOALTSTACK) return {};
             ++in;
             NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_A, Vector(std::move(constructed.back())));
             constructed.pop_back();
             constructed.push_back(std::move(node));
             break;
-        case DecodeContext::Check:
+        }
+        case DecodeContext::Check: {
             NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_C, Vector(std::move(constructed.back())));
             constructed.pop_back();
             constructed.push_back(std::move(node));
             break;
-        case DecodeContext::DupIf:
+        }
+        case DecodeContext::DupIf: {
             NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_D, Vector(std::move(constructed.back())));
             constructed.pop_back();
             constructed.push_back(std::move(node));
             break;
-        case DecodeContext::Verify:
+        }
+        case DecodeContext::Verify: {
             NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_V, Vector(std::move(constructed.back())));
             constructed.pop_back();
             constructed.push_back(std::move(node));
             break;
-        case DecodeContext::NonZero:
+        }
+        case DecodeContext::NonZero: {
             NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_J, Vector(std::move(constructed.back())));
             constructed.pop_back();
             constructed.push_back(std::move(node));
             break;
-        case DecodeContext::ZeroNotEqual:
+        }
+        case DecodeContext::ZeroNotEqual: {
             NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(constructed.back())));
             constructed.pop_back();
             constructed.push_back(std::move(node));
             break;
-        case DecodeContext::AndV:
+        }
+        case DecodeContext::AndV: {
             if (in < last && in[0].first != OP_IF && in[0].first != OP_ELSE && in[0].first != OP_ENDIF && in[0].first != OP_TOALTSTACK && in[0].first != OP_SWAP) {
-                to_parse.emplace_back(DecodeContext::AND_V, -1, -1);
+                to_parse.emplace_back(DecodeContext::AndV, -1, -1);
                 to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
             } else {
                 NodeRef<Key> left = std::move(constructed.back());
@@ -1321,35 +1330,40 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
                 constructed.push_back(MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(left), std::move(right))));
             }
             break;
-        case DecodeContext::AndB:
+        }
+        case DecodeContext::AndB: {
             NodeRef<Key> left = std::move(constructed.back());
             constructed.pop_back();
             NodeRef<Key> right = std::move(constructed.back());
             constructed.pop_back();
             constructed.push_back(MakeNodeRef<Key>(NodeType::AND_B, Vector(std::move(left), std::move(right))));
             break;
-        case DecodeContext::OrB:
+        }
+        case DecodeContext::OrB: {
             NodeRef<Key> left = std::move(constructed.back());
             constructed.pop_back();
             NodeRef<Key> right = std::move(constructed.back());
             constructed.pop_back();
             constructed.push_back(MakeNodeRef<Key>(NodeType::OR_B, Vector(std::move(left), std::move(right))));
             break;
-        case DecodeContext::OrC:
+        }
+        case DecodeContext::OrC: {
             NodeRef<Key> left = std::move(constructed.back());
             constructed.pop_back();
             NodeRef<Key> right = std::move(constructed.back());
             constructed.pop_back();
             constructed.push_back(MakeNodeRef<Key>(NodeType::OR_C, Vector(std::move(left), std::move(right))));
             break;
-        case DecodeContext::OrD:
+        }
+        case DecodeContext::OrD: {
             NodeRef<Key> left = std::move(constructed.back());
             constructed.pop_back();
             NodeRef<Key> right = std::move(constructed.back());
             constructed.pop_back();
             constructed.push_back(MakeNodeRef<Key>(NodeType::OR_D, Vector(std::move(left), std::move(right))));
             break;
-        case DecodeContext::AndOr:
+        }
+        case DecodeContext::AndOr: {
             NodeRef<Key> left = std::move(constructed.back());
             constructed.pop_back();
             NodeRef<Key> right = std::move(constructed.back());
@@ -1358,7 +1372,8 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
             constructed.pop_back();
             constructed.push_back(MakeNodeRef<Key>(NodeType::ANDOR, Vector(std::move(left), std::move(mid), std::move(right))));
             break;
-        case ThreshW:
+        }
+        case DecodeContext::ThreshW: {
             if (in >= last) return {};
             if (in[0].first == OP_ADD) {
                 ++in;
@@ -1369,7 +1384,8 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
             to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
             to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             break;
-        case ThreshE:
+        }
+        case DecodeContext::ThreshE: {
             std::vector<NodeRef<Key>> subs;
             for (int i = 0; i < n; ++i) {
                 NodeRef<Key> sub = std::move(constructed.back());
@@ -1378,9 +1394,10 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
             }
             constructed.push_back(MakeNodeRef<Key>(NodeType::THRESH, std::move(subs), k));
             break;
-        case EndIf:
+        }
+        case DecodeContext::EndIf: {
             if (in >= last) return {};
-            
+
             // could be andor or or_i
             if (in[0].first == OP_ELSE) {
                 ++in;
@@ -1410,7 +1427,8 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
                 return {};
             }
             break;
-        case EndIfNotIf:
+        }
+        case DecodeContext::EndIfNotIf: {
             if (in >= last) return {};
             if (in[0].first == OP_IFDUP) {
                 ++in;
@@ -1420,7 +1438,8 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
             }
             to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             break;
-        case EndIfElse:
+        }
+        case DecodeContext::EndIfElse: {
             if (in >= last) return {};
             if (in[0].first == OP_IF) {
                 ++in;
@@ -1437,6 +1456,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
                 return {};
             }
             break;
+        }
         }
     }
     if (constructed.size() != 1) return {};
