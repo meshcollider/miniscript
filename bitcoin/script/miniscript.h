@@ -1068,612 +1068,379 @@ bool DecomposeScript(const CScript& script, std::vector<std::pair<opcodetype, st
 /** Determine whether the passed pair (created by DecomposeScript) is pushing a number. */
 bool ParseScriptNumber(const std::pair<opcodetype, std::vector<unsigned char>>& in, int64_t& k);
 
+
+
+//! The different node types in miniscript.
+enum class DecodeContext {
+    Expression,
+    MaybeSwap,
+    MaybeAndV,
+    Alt,
+    Check,
+    DupIf,
+    Verify,
+    NonZero,
+    ZeroNotEqual,
+    AndV,
+    AndB,
+    AndOr,
+    OrB,
+    OrC,
+    OrD,
+    ThreshW,
+    ThreshE,
+    // could be or_d, or_c, or_i, d:, n:
+    EndIf,
+    // could be or_d, or_c
+    EndIfNotIf,
+    // could be or_i or andor
+    EndIfElse,
+};
+
+
 template<typename Key, typename Ctx, typename I>
-inline NodeRef<Key> DecodeScript(I& start, I end, const Ctx& ctx) {
-    std::vector<std::tuple<I, I, NodeType, int, vector<int>>> to_parse;
+inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
+    // The two integers are used to hold state for thresh()
+    std::vector<DecodeContext, int64_t, int64_t> to_parse;
     std::vector<NodeRef<Key>> constructed;
 
-    // The root node context is AND_V because it may be made up of multiple sub-expressions
-    // We push a special empty parent to deal with this, so all the AND_V children can be stored
-    to_parse.emplace_back(start, start, NodeType::AND_V, -1, std::vector<int>());
-    // Then we push the actual expression
-    to_parse.emplace_back(start, end, NodeType::AND_V, 0, std::vector<int>());
+    // There may be implicit and_v expressions [X] [Y] or s: wrapper SWAP [X]
+    to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
+    to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+    to_parse.emplace_back(DecodeContext::Expression, -1, -1);
 
     while (!to_parse.empty()) {
-        // Decompose the current to-parse tuple (we always process the last in the stack)
-        I in = std::get<0>(to_parse.back());
-        I last = std::get<1>(to_parse.back());
-        if (in > last) return {};
-        NodeType context = std::get<2>(to_parse.back());
-        int this_parent = std::get<3>(to_parse.back());
-        std::vector<int>& children = std::get<4>(to_parse.back());
-        int this_index = to_parse.size() - 1;
 
-        // node to be constructed
-        NodeRef<Key> node;
+        // Get the current context we are decoding within
+        DecodeContext cur_context = std::get<0>(to_parse.back());
+        int64_t n = std::get<1>(to_parse.back());
+        int64_t k = std::get<2>(to_parse.back());
+        to_parse.pop_back();
 
-        // We never push an empty subexpression onto the stack unless it is an implicit AND_V parent.
-        if (in == last) {
-            // If not, something is invalid (e.g. empty brackets).
-            if (context != NodeType::AND_V) return {};
-            
-            // AND_V should have at least one child
-            if (children.empty()) return {};
+        switch(cur_context) {
+        case DecodeContext::Expression:
+            if (in >= last) return {};
 
-            // Build the AND_V expression from the children
-            node = std::move(constructed[i]);
-            for (int i = 1; i < children.size(); ++i) {
-                node = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(constructed[children.at(i)]), std::move(node)));
+            // Constants
+            if (in[0].first == OP_1) {
+                ++in;
+                constructed.push_back(MakeNodeRef<Key>(NodeType::JUST_1));
             }
-            // TODO: deal with extra children (children.clear()?)
-        }
+            else if (in[0].first == OP_0) {
+                ++in;
+                constructed.push_back(MakeNodeRef<Key>(NodeType::JUST_0));
+            }
 
-        // TODO: pass up to the closest starting environment for these expressions
-        else if (in[0].second == OP_IF || in[0].second == OP_ELSE || in[0].second == OP_NOTIF) {
-
-        }
-        // TODO: WRAP_S and WRAP_A
-        else if (in[0].second == OP_TOALTSTACK || in[0].second == OP_SWAP) {
-
-        }
-        // TODO: THRESH
-        else if (last - in >= 2 && in[0].first == OP_ADD) {
-            ++in;
-            auto sub = DecodeWrapped<Key>(in, last, ctx);
-            if (!sub) return {};
-            subs.push_back(std::move(sub));
-        }
-
-        // ===================================================
-        // ========= PROCESS SINGLE WITH NO CHILDREN =========
-        // ===================================================
-        else if (last > in && in[0].first == OP_1) {
-            ++in;
-            node = MakeNodeRef<Key>(NodeType::JUST_1);
-        }
-        else if (last > in && in[0].first == OP_0) {
-            ++in;
-            node = MakeNodeRef<Key>(NodeType::JUST_0);
-        }
-        else if (last > in && in[0].second.size() == 33) {
-            Key key;
-            if (!ctx.FromPKBytes(in[0].second.begin(), in[0].second.end(), key)) return {};
-            ++in;
-            node = MakeNodeRef<Key>(NodeType::PK_K, Vector(std::move(key)));
-        }
-        else if (last - in >= 5 && in[0].first == OP_VERIFY && in[1].first == OP_EQUAL && in[3].first == OP_HASH160 && in[4].first == OP_DUP && in[2].second.size() == 20) {
-            Key key;
-            if (!ctx.FromPKHBytes(in[2].second.begin(), in[2].second.end(), key)) return {};
-            in += 5;
-            node = MakeNodeRef<Key>(NodeType::PK_H, Vector(std::move(key)));
-        }
-        else if (last - in >= 2 && in[0].first == OP_CHECKSEQUENCEVERIFY && ParseScriptNumber(in[1], k)) {
-            in += 2;
-            if (k < 1 || k > 0x7FFFFFFFL) return {};
-            node = MakeNodeRef<Key>(NodeType::OLDER, k);
-        }
-        else if (last - in >= 2 && in[0].first == OP_CHECKLOCKTIMEVERIFY && ParseScriptNumber(in[1], k)) {
-            in += 2;
-            if (k < 1 || k > 0x7FFFFFFFL) return {};
-            node = MakeNodeRef<Key>(NodeType::AFTER, k);
-        }
-        else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 32 && in[2].first == OP_SHA256 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-            in += 7;
-            node = MakeNodeRef<Key>(NodeType::SHA256, in[-6].second);
-        }
-        else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 20 && in[2].first == OP_RIPEMD160 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-            in += 7;
-            node = MakeNodeRef<Key>(NodeType::RIPEMD160, in[-6].second);
-        }
-        else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 32 && in[2].first == OP_HASH256 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-            in += 7;
-            node = MakeNodeRef<Key>(NodeType::HASH256, in[-6].second);
-        }
-        else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 20 && in[2].first == OP_HASH160 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-            in += 7;
-            node = MakeNodeRef<Key>(NodeType::HASH160, in[-6].second);
-        }
-        else if (last - in >= 3 && in[0].first == OP_CHECKMULTISIG) {
-            std::vector<Key> keys;
-            int64_t n;
-            if (!ParseScriptNumber(in[1], n)) return {};
-            if (last - in < 3 + n) return {};
-            if (n < 1 || n > 20) return {};
-            for (int i = 0; i < n; ++i) {
+            // Public keys
+            else if (in[0].second.size() == 33) {
                 Key key;
-                if (in[2 + i].second.size() != 33) return {};
-                if (!ctx.FromPKBytes(in[2 + i].second.begin(), in[2 + i].second.end(), key)) return {};
-                keys.push_back(std::move(key));
-            }
-            if (!ParseScriptNumber(in[2 + n], k)) return {};
-            if (k < 1 || k > n) return {};
-            in += 3 + n;
-            std::reverse(keys.begin(), keys.end());
-            node = MakeNodeRef<Key>(NodeType::MULTI, std::move(keys), k);
-        }
-
-        // ===============================================
-        // ========= SINGLE WRAPPERS C, V, and N =========
-        // ===============================================
-
-        // TODO: move the !children.empty() cases earlier
-        // TODO: deal with extra children
-        // Note these op codes only affect the last term in an and_v for example, so we can assume a single follows it
-        // wlog, since v:and_v(X, Y) = and_v(X, v:Y)
-        else if (last - in >= 2 && in[0].first == OP_CHECKSIG) {
-            ++in;
-            if (children.empty()) {
-                to_parse.emplace_back(in, last, NodeType::WRAP_C, this_index, vector<int>());
-                continue;
-            } else {
-                node = MakeNodeRef<Key>(NodeType::WRAP_C, Vector(std::move(constructed[children.at(0)])));
-                children.erase(children.begin());
-            }
-        }
-        else if (last - in >= 2 && in[0].first == OP_VERIFY) {
-            ++in;
-            if (children.empty()) {
-                to_parse.emplace_back(in, last, NodeType::WRAP_V, this_index, vector<int>());
-                continue;
-            } else {
-                node = MakeNodeRef<Key>(NodeType::WRAP_V, Vector(std::move(constructed[children.at(0)])));
-                children.erase(children.begin());
-            }
-        }
-        else if (last - in >= 2 && in[0].first == OP_0NOTEQUAL) {
-            ++in;
-            if (children.empty()) {
-                to_parse.emplace_back(in, last, NodeType::WRAP_N, this_index, vector<int>());
-                continue;
-            } else {
-                node = MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(constructed[children.at(0)])));
-                children.erase(children.begin());
-            }
-        }
-
-        // ====================================================================
-        // ========= PROCESS BOOL-TYPE WITH TWO CHILDREN (W + SINGLE) =========
-        // ====================================================================
-
-        // and_b and or_b should both have a wrapped (type W) child followed by a single child
-
-        // or_b(X,Z) / and_b(X,Z)	X is B; Z is W
-
-        else if (last - in >= 3 && in[0].first == OP_BOOLAND) {
-            ++in;
-            if (children.empty()){
-                // Both of these should be processed as "multi" like the root node, but expect a single following it.
-                if (in[0].first == OP_FROMALTSTACK) {
-                    to_parse.emplace_back(in, last, NodeType::WRAP_A, this_index, vector<int>());
-                } else {
-                    to_parse.emplace_back(in, last, NodeType::WRAP_S, this_index, vector<int>());
-                }
+                if (!ctx.FromPKBytes(in[0].second.begin(), in[0].second.end(), key)) return {};
                 ++in;
-                // There may be an implicit AND_V wrapper here so we push an empty parent first
-                to_parse.emplace_back(in, in, NodeType::AND_V, this_index+1, vector<int>());
-                to_parse.emplace_back(in, last, NodeType::AND_V, this_index+2, vector<int>());
-                continue;
-            } else if (children.size() >= 2) {
-                node = MakeNodeRef<Key>(NodeType::AND_B, Vector(std::move(constructed[children.at(0)]), std::move(constructed[children.at(1)])));
-                // TODO: deal with extra children
-                children.erase(children.begin(), children.begin()+2);
-            } else {
-                // If we get back here with insufficient children, fail
+                constructed.push_back(MakeNodeRef<Key>(NodeType::PK_K, Vector(std::move(key))));
+            }
+            else if (last - in >= 5 && in[0].first == OP_VERIFY && in[1].first == OP_EQUAL && in[3].first == OP_HASH160 && in[4].first == OP_DUP && in[2].second.size() == 20) {
+                Key key;
+                if (!ctx.FromPKHBytes(in[2].second.begin(), in[2].second.end(), key)) return {};
+                in += 5;
+                constructed.push_back(MakeNodeRef<Key>(NodeType::PK_H, Vector(std::move(key))));
+            }
+
+            // Time locks
+            else if (last - in >= 2 && in[0].first == OP_CHECKSEQUENCEVERIFY && ParseScriptNumber(in[1], k)) {
+                in += 2;
+                if (k < 1 || k > 0x7FFFFFFFL) return {};
+                constructed.push_back(MakeNodeRef<Key>(NodeType::OLDER, k));
+            }
+            else if (last - in >= 2 && in[0].first == OP_CHECKLOCKTIMEVERIFY && ParseScriptNumber(in[1], k)) {
+                in += 2;
+                if (k < 1 || k > 0x7FFFFFFFL) return {};
+                constructed.push_back(MakeNodeRef<Key>(NodeType::AFTER, k));
+            }
+
+            // Hashes
+            else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 32 && in[2].first == OP_SHA256 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
+                constructed.push_back(MakeNodeRef<Key>(NodeType::SHA256, in[1].second));
+                in += 7;
+            }
+            else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 20 && in[2].first == OP_RIPEMD160 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
+                constructed.push_back(MakeNodeRef<Key>(NodeType::RIPEMD160, in[1].second));
+                in += 7;
+            }
+            else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 32 && in[2].first == OP_HASH256 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
+                constructed.push_back(MakeNodeRef<Key>(NodeType::HASH256, in[1].second));
+                in += 7;
+            }
+            else if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 20 && in[2].first == OP_HASH160 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
+                constructed.push_back(MakeNodeRef<Key>(NodeType::HASH160, in[1].second));
+                in += 7;
+            }
+
+            // Multi
+            else if (last - in >= 3 && in[0].first == OP_CHECKMULTISIG) {
+                std::vector<Key> keys;
+                if (!ParseScriptNumber(in[1], n)) return {};
+                if (last - in < 3 + n) return {};
+                if (n < 1 || n > 20) return {};
+                for (int i = 0; i < n; ++i) {
+                    Key key;
+                    if (in[2 + i].second.size() != 33) return {};
+                    if (!ctx.FromPKBytes(in[2 + i].second.begin(), in[2 + i].second.end(), key)) return {};
+                    keys.push_back(std::move(key));
+                }
+                if (!ParseScriptNumber(in[2 + n], k)) return {};
+                if (k < 1 || k > n) return {};
+                in += 3 + n;
+                std::reverse(keys.begin(), keys.end());
+                constructed.push_back(MakeNodeRef<Key>(NodeType::MULTI, std::move(keys), k));
+            }
+
+            // c: wrapper
+            else if (in[0].first == OP_CHECKSIG) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::Check, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            }
+            // v: wrapper
+            else if (in[0].first == OP_VERIFY) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::Verify, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            }
+            // n: wrapper
+            else if (in[0].first == OP_0NOTEQUAL) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::ZeroNotEqual, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            }
+
+            // Thresh
+            else if (last - in >= 3 && in[0].first == OP_EQUAL && ParseScriptNumber(in[1], k)) {
+                if (k < 1) return {};
+                in += 2;
+                to_parse.emplace_back(DecodeContext::ThreshW, 0, k);
+            }
+
+            // a: wrapper
+            else if (in[0].first == OP_FROMALTSTACK) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::Alt, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            }
+
+            // OP_ENDIF can be WRAP_J, WRAP_D, ANDOR, OR_C, OR_D, or OR_I
+            else if (in[0].first == OP_ENDIF) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::EndIf, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            }
+
+            // and_b
+            else if (in[0].first == OP_BOOLAND) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::AndB, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            }
+            // or_b
+            else if (in[0].first == OP_BOOLOR) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::OrB, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            }
+
+            else {
+                // Unrecognised expression
                 return {};
             }
-        }
-        else if (last - in >= 3 && in[0].first == OP_BOOLOR) {
-            ++in;
-            if (children.empty()) {
-                // Both of these should be processed as "multi" like the root node, but expect a single following it.
-                if (in[0].first == OP_FROMALTSTACK) {
-                    to_parse.emplace_back(in, last, NodeType::WRAP_A, this_index, vector<int>());
-                } else {
-                    to_parse.emplace_back(in, last, NodeType::WRAP_S, this_index, vector<int>());
-                }
-                ++in;
-                // There may be an implicit AND_V wrapper here so we push an empty parent first
-                to_parse.emplace_back(in, in, NodeType::AND_V, this_index+1, vector<int>());
-                to_parse.emplace_back(in, last, NodeType::AND_V, this_index+2, vector<int>());
-                continue;
-            } else if (children.size() >= 2) {
-                node = MakeNodeRef<Key>(NodeType::OR_B, Vector(std::move(constructed[children.at(0)]), std::move(constructed[children.at(1)])));
-                // TODO: deal with extra children
-                children.erase(children.begin(), children.begin()+2);
-            } else {
-                return {};
+
+            break;
+        case DecodeContext::MaybeAndV:
+            // If we reach a potential AND_V top-level, check if the next part of the script could be another AND_V child
+            if (in < last && in[0].first != OP_IF && in[0].first != OP_ELSE && in[0].first != OP_ENDIF && in[0].first != OP_TOALTSTACK && in[0].first != OP_SWAP) {
+                to_parse.emplace_back(DecodeContext::AND_V, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             }
-        }
-
-        // ====================================================================
-        // ========= Complicated AND_* and OR_* expressions =========
-        // ====================================================================
-
-        // IF [X] ENDIF can by WRAP_J or WRAP_D depending on what follows
-
-        // [X] NOTIF [Z] ELSE [Y] ENDIF is ANDOR
-
-        // NOTIF [Z] ENDIF can be OR_C or OR_D depending on what follows
-
-        // IF [X] ELSE [Z] ENDIF is OR_I
-
-        else if (last - in >= 3 && in[0].first == OP_ENDIF) {
-            to_parse.emplace_back(in, last, NodeType::ANDOR, this_index, vector<int>());
+            break;
+        case DecodeContext::MaybeSwap:
+            if (in < last && in[0].first == OP_SWAP) {
+                ++in;
+                NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_S, Vector(std::move(constructed.back())));
+                constructed.pop_back();
+                constructed.push_back(std::move(node));
+                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+            }
+            break;
+        case DecodeContext::Alt:
+            if (in >= last || in[0].first != OP_TOALTSTACK) return {};
             ++in;
-            // There may be an implicit AND_V wrapper here so we push an empty parent first
-            to_parse.emplace_back(in, in, NodeType::AND_V, this_index+1, vector<int>());
-            to_parse.emplace_back(in, last, NodeType::AND_V, this_index+2, vector<int>());
-
-
-
-            NodeRef<Key> sub1;
-            sub1 = DecodeMulti<Key>(in, last, ctx);
-            if (!sub1) return {};
-            bool have_else = false;
-            NodeRef<Key> sub2;
-            if (last - in == 0) return {};
+            NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_A, Vector(std::move(constructed.back())));
+            constructed.pop_back();
+            constructed.push_back(std::move(node));
+            break;
+        case DecodeContext::Check:
+            NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_C, Vector(std::move(constructed.back())));
+            constructed.pop_back();
+            constructed.push_back(std::move(node));
+            break;
+        case DecodeContext::DupIf:
+            NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_D, Vector(std::move(constructed.back())));
+            constructed.pop_back();
+            constructed.push_back(std::move(node));
+            break;
+        case DecodeContext::Verify:
+            NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_V, Vector(std::move(constructed.back())));
+            constructed.pop_back();
+            constructed.push_back(std::move(node));
+            break;
+        case DecodeContext::NonZero:
+            NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_J, Vector(std::move(constructed.back())));
+            constructed.pop_back();
+            constructed.push_back(std::move(node));
+            break;
+        case DecodeContext::ZeroNotEqual:
+            NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(constructed.back())));
+            constructed.pop_back();
+            constructed.push_back(std::move(node));
+            break;
+        case DecodeContext::AndV:
+            if (in < last && in[0].first != OP_IF && in[0].first != OP_ELSE && in[0].first != OP_ENDIF && in[0].first != OP_TOALTSTACK && in[0].first != OP_SWAP) {
+                to_parse.emplace_back(DecodeContext::AND_V, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
+            } else {
+                NodeRef<Key> left = std::move(constructed.back());
+                constructed.pop_back();
+                NodeRef<Key> right = std::move(constructed.back());
+                constructed.pop_back();
+                constructed.push_back(MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(left), std::move(right))));
+            }
+            break;
+        case DecodeContext::AndB:
+            NodeRef<Key> left = std::move(constructed.back());
+            constructed.pop_back();
+            NodeRef<Key> right = std::move(constructed.back());
+            constructed.pop_back();
+            constructed.push_back(MakeNodeRef<Key>(NodeType::AND_B, Vector(std::move(left), std::move(right))));
+            break;
+        case DecodeContext::OrB:
+            NodeRef<Key> left = std::move(constructed.back());
+            constructed.pop_back();
+            NodeRef<Key> right = std::move(constructed.back());
+            constructed.pop_back();
+            constructed.push_back(MakeNodeRef<Key>(NodeType::OR_B, Vector(std::move(left), std::move(right))));
+            break;
+        case DecodeContext::OrC:
+            NodeRef<Key> left = std::move(constructed.back());
+            constructed.pop_back();
+            NodeRef<Key> right = std::move(constructed.back());
+            constructed.pop_back();
+            constructed.push_back(MakeNodeRef<Key>(NodeType::OR_C, Vector(std::move(left), std::move(right))));
+            break;
+        case DecodeContext::OrD:
+            NodeRef<Key> left = std::move(constructed.back());
+            constructed.pop_back();
+            NodeRef<Key> right = std::move(constructed.back());
+            constructed.pop_back();
+            constructed.push_back(MakeNodeRef<Key>(NodeType::OR_D, Vector(std::move(left), std::move(right))));
+            break;
+        case DecodeContext::AndOr:
+            NodeRef<Key> left = std::move(constructed.back());
+            constructed.pop_back();
+            NodeRef<Key> right = std::move(constructed.back());
+            constructed.pop_back();
+            NodeRef<Key> mid = std::move(constructed.back());
+            constructed.pop_back();
+            constructed.push_back(MakeNodeRef<Key>(NodeType::ANDOR, Vector(std::move(left), std::move(mid), std::move(right))));
+            break;
+        case ThreshW:
+            if (in >= last) return {};
+            if (in[0].first == OP_ADD) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::ThreshW, n+1, k);
+            } else {
+                to_parse.emplace_back(DecodeContext::ThreshE, n+1, k);
+            }
+            to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+            to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            break;
+        case ThreshE:
+            std::vector<NodeRef<Key>> subs;
+            for (int i = 0; i < n; ++i) {
+                NodeRef<Key> sub = std::move(constructed.back());
+                constructed.pop_back();
+                subs.push_back(std::move(sub));
+            }
+            constructed.push_back(MakeNodeRef<Key>(NodeType::THRESH, std::move(subs), k));
+            break;
+        case EndIf:
+            if (in >= last) return {};
+            
+            // could be andor or or_i
             if (in[0].first == OP_ELSE) {
                 ++in;
-                have_else = true;
-                sub2 = DecodeMulti<Key>(in, last, ctx);
-                if (!sub2) return {};
+                to_parse.emplace_back(DecodeContext::EndIfElse, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
+                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             }
-            if (last - in == 0 || (in[0].first != OP_IF && in[0].first != OP_NOTIF)) return {};
-            bool negated = (in[0].first == OP_NOTIF);
-            ++in;
-
-            if (!have_else && !negated) {
-                if (last > in && in[0].first == OP_DUP) {
-                    ++in;
-                    return MakeNodeRef<Key>(NodeType::WRAP_D, Vector(std::move(sub1)));
-                }
-                if (last - in >= 2 && in[0].first == OP_0NOTEQUAL && in[1].first == OP_SIZE) {
+            // could be j: or d: wrapper
+            else if (in[0].first == OP_IF) {
+                if (last - in >= 2 && in[1].first == OP_DUP) {
                     in += 2;
-                    return MakeNodeRef<Key>(NodeType::WRAP_J, Vector(std::move(sub1)));
+                    to_parse.emplace_back(DecodeContext::DupIf, -1, -1);
+                } else if (last - in >= 3 && in[1].first == OP_0NOTEQUAL && in[2].first == OP_SIZE) {
+                    in += 3;
+                    to_parse.emplace_back(DecodeContext::ZeroNotEqual, -1, -1);
                 }
+                else {
+                    return {};
+                }
+            // could be or_c or or_d
+            } else if (in[0].first == OP_NOTIF) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::EndIfNotIf, -1, -1);
+            }
+            else {
                 return {};
             }
-            if (have_else && negated) {
-                auto sub3 = DecodeSingle<Key>(in, last, ctx);
-                if (!sub3) return {};
-                return MakeNodeRef<Key>(NodeType::ANDOR, Vector(std::move(sub3), std::move(sub1), std::move(sub2)));
+            break;
+        case EndIfNotIf:
+            if (in >= last) return {};
+            if (in[0].first == OP_IFDUP) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::OrD, -1, -1);
+            } else {
+                to_parse.emplace_back(DecodeContext::OrC, -1, -1);
             }
-            if (!have_else && negated) {
-                if (last - in >= 2 && in[0].first == OP_IFDUP) {
-                    ++in;
-                    auto sub3 = DecodeSingle<Key>(in, last, ctx);
-                    if (!sub3) return {};
-                    return MakeNodeRef<Key>(NodeType::OR_D, Vector(std::move(sub3), std::move(sub1)));
-                }
-                if (last > in) {
-                    auto sub3 = DecodeSingle<Key>(in, last, ctx);
-                    if (!sub3) return {};
-                    return MakeNodeRef<Key>(NodeType::OR_C, Vector(std::move(sub3), std::move(sub1)));
-                }
-                return {};
-            }
-            if (have_else && !negated) {
-                return MakeNodeRef<Key>(NodeType::OR_I, Vector(std::move(sub2), std::move(sub1)));
-            }
-            return {};
-        }
-
-        // ====================================================================
-        // ========= THRESH  =========
-        // ====================================================================
-
-        else if (last - in >= 3 && in[0].first == OP_EQUAL && ParseScriptNumber(in[1], k)) {
-            if (k < 1) return {};
-            in += 2;
-            if (children.empty()) {
-                to_parse.emplace_back(in, last, NodeType::THRESH, this_index, vector<int>());
-                continue;
-            } else if (children.size() >= static_cast<unsigned int>(k)) {
-                std::vector<NodeRef<Key>> subs;
-                for (i : children) {
-                    subs.push_back(std::move(constructed[i]));
-                }
-                node = MakeNodeRef<Key>(NodeType::THRESH, std::move(subs), k);
+            to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            break;
+        case EndIfElse:
+            if (in >= last) return {};
+            if (in[0].first == OP_IF) {
+                ++in;
+                NodeRef<Key> left = std::move(constructed.back());
+                constructed.pop_back();
+                NodeRef<Key> right = std::move(constructed.back());
+                constructed.pop_back();
+                constructed.push_back(MakeNodeRef<Key>(NodeType::OR_I, Vector(std::move(left), std::move(right))));
+            } else if (in[0].first == OP_NOTIF) {
+                ++in;
+                to_parse.emplace_back(DecodeContext::AndOr, -1, -1);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             } else {
                 return {};
             }
+            break;
         }
-
-        // ======================================
-        // ========= DEAL WITH WRAPPERS =========
-        // ======================================
-
-        if (last - in <= 1 || in[0].first == OP_TOALTSTACK) {
-            NodeType parent_context = context;
-            int current_parent = this_parent;
-            while (context != NodeType::WRAP_A) {
-                if (current_parent == -1) return {};
-                // Get the context of our current parent
-                parent_context = std::get<2>(to_parse[current_parent]);
-                // Get the parent ID of our current parent
-                current_parent = std::get<3>(to_parse[current_parent]);
-            }
-            // TODO: We have found the closest parent for the WRAP_A context
-            // TODO: now all the children should be constructed into AND_V as a child of WRAP_A
-        }
-        // TODO: do the same with OP_SWAP
-
-        // TODO: this is wrong because inside a: and s: we can have multi (and_v)
-        // If we are in an a: wrapper, make sure we have the matching OP_TOALTSTACK
-        if (context == NodeType::WRAP_A) {
-            if (last - in <= 1 || in[0].first != OP_TOALTSTACK) return {};
-            in++;
-        // If we are inside an s: wrapper, make sure we have the required OP_SWAP
-        } else if (context == NodeType::WRAP_S) {
-            if (last - in <= 1 || in[0].first != OP_SWAP) return {};
-            in++;
-        }
-        // TODO: Then following WRAP_A or WRAP_S there should be a single expression
-
-
-        // ================================================================
-        // ========= ENSURE WE HAVE PROCESSED THE WHOLE SUBSCRIPT =========
-        // ================================================================
-
-        // We treat following subscripts as children of this one, because
-        // if they aren't used, they'll be passed back up anyway to the parent
-        if (children.empty() && last > in) {
-            int next_parent = this_parent;
-            if (next_parent == -1 || context != NodeType::AND_V) {
-                next_parent = this_index;
-            }
-            to_parse.emplace_back(in, last, NodeType::AND_V, next_parent, vector<int>());
-            continue;
-        }
-
-        // ===============================================
-        // ========= DEAL WITH LEFTOVER CHILDREN =========
-        // ===============================================
-
-        // If we reach this point, we have constructed a node successfully.
-        // If we still have remaining children, they must belong to a higher parent or an AND_V
-        std::vector<int>& parent_children = std::get<4>(to_parse[this_parent]);
-
-        
-
-        // pass remaining children up to the parent's children list (siblings), and from now on, set remainder to have the upper parent.
-        for (child : children) {
-            parent_children.push_back(child);
-        }
-
-        // We've successfully constructed this node now, so remove it from the parse list.
-
-        if (this_parent == -1) {
-            return node;
-        }
-        constructed.push_back(std::move(node));
-        parent_children.push_back(constructed.size()-1);
-        to_parse.pop_back();
     }
-    return {};
-
-}
-
-
-
-template<typename Key, typename Ctx, typename I> inline NodeRef<Key> DecodeSingle(I& in, I last, const Ctx& ctx);
-template<typename Key, typename Ctx, typename I> inline NodeRef<Key> DecodeMulti(I& in, I last, const Ctx& ctx);
-template<typename Key, typename Ctx, typename I> inline NodeRef<Key> DecodeWrapped(I& in, I last, const Ctx& ctx);
-
-//! Decode a list of script elements into a miniscript (except and_v, s:, and a:).
-template<typename Key, typename Ctx, typename I>
-inline NodeRef<Key> DecodeSingle(I& in, I last, const Ctx& ctx) {
-    std::vector<NodeRef<Key>> subs;
-    std::vector<Key> keys;
-    int64_t k;
-
-    if (last > in && in[0].first == OP_1) {
-        ++in;
-        return MakeNodeRef<Key>(NodeType::JUST_1);
-    }
-    if (last > in && in[0].first == OP_0) {
-        ++in;
-        return MakeNodeRef<Key>(NodeType::JUST_0);
-    }
-    if (last > in && in[0].second.size() == 33) {
-        Key key;
-        if (!ctx.FromPKBytes(in[0].second.begin(), in[0].second.end(), key)) return {};
-        ++in;
-        return MakeNodeRef<Key>(NodeType::PK_K, Vector(std::move(key)));
-    }
-    if (last - in >= 5 && in[0].first == OP_VERIFY && in[1].first == OP_EQUAL && in[3].first == OP_HASH160 && in[4].first == OP_DUP && in[2].second.size() == 20) {
-        Key key;
-        if (!ctx.FromPKHBytes(in[2].second.begin(), in[2].second.end(), key)) return {};
-        in += 5;
-        return MakeNodeRef<Key>(NodeType::PK_H, Vector(std::move(key)));
-    }
-    if (last - in >= 2 && in[0].first == OP_CHECKSEQUENCEVERIFY && ParseScriptNumber(in[1], k)) {
-        in += 2;
-        if (k < 1 || k > 0x7FFFFFFFL) return {};
-        return MakeNodeRef<Key>(NodeType::OLDER, k);
-    }
-    if (last - in >= 2 && in[0].first == OP_CHECKLOCKTIMEVERIFY && ParseScriptNumber(in[1], k)) {
-        in += 2;
-        if (k < 1 || k > 0x7FFFFFFFL) return {};
-        return MakeNodeRef<Key>(NodeType::AFTER, k);
-    }
-    if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 32 && in[2].first == OP_SHA256 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-        in += 7;
-        return MakeNodeRef<Key>(NodeType::SHA256, in[-6].second);
-    }
-    if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 20 && in[2].first == OP_RIPEMD160 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-        in += 7;
-        return MakeNodeRef<Key>(NodeType::RIPEMD160, in[-6].second);
-    }
-    if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 32 && in[2].first == OP_HASH256 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-        in += 7;
-        return MakeNodeRef<Key>(NodeType::HASH256, in[-6].second);
-    }
-    if (last - in >= 7 && in[0].first == OP_EQUAL && in[1].second.size() == 20 && in[2].first == OP_HASH160 && in[3].first == OP_VERIFY && in[4].first == OP_EQUAL && ParseScriptNumber(in[5], k) && k == 32 && in[6].first == OP_SIZE) {
-        in += 7;
-        return MakeNodeRef<Key>(NodeType::HASH160, in[-6].second);
-    }
-    if (last - in >= 2 && in[0].first == OP_CHECKSIG) {
-        ++in;
-        auto sub = DecodeSingle<Key>(in, last, ctx);
-        if (!sub) return {};
-        return MakeNodeRef<Key>(NodeType::WRAP_C, Vector(std::move(sub)));
-    }
-    if (last - in >= 3 && in[0].first == OP_BOOLAND) {
-        ++in;
-        auto sub1 = DecodeWrapped<Key>(in, last, ctx);
-        if (!sub1) return {};
-        auto sub2 = DecodeSingle<Key>(in, last, ctx);
-        if (!sub2) return {};
-        return MakeNodeRef<Key>(NodeType::AND_B, Vector(std::move(sub2), std::move(sub1)));
-    }
-    if (last - in >= 3 && in[0].first == OP_BOOLOR) {
-        ++in;
-        auto sub1 = DecodeWrapped<Key>(in, last, ctx);
-        if (!sub1) return {};
-        auto sub2 = DecodeSingle<Key>(in, last, ctx);
-        if (!sub2) return {};
-        return MakeNodeRef<Key>(NodeType::OR_B, Vector(std::move(sub2), std::move(sub1)));
-    }
-    if (last - in >= 2 && in[0].first == OP_VERIFY) {
-        ++in;
-        auto sub = DecodeSingle<Key>(in, last, ctx);
-        if (!sub) return {};
-        return MakeNodeRef<Key>(NodeType::WRAP_V, Vector(std::move(sub)));
-    }
-    if (last - in >= 2 && in[0].first == OP_0NOTEQUAL) {
-        ++in;
-        auto sub = DecodeSingle<Key>(in, last, ctx);
-        if (!sub) return {};
-        return MakeNodeRef<Key>(NodeType::WRAP_N, Vector(std::move(sub)));
-    }
-    if (last > in && in[0].first == OP_ENDIF) {
-        ++in;
-        if (last - in == 0) return {};
-        NodeRef<Key> sub1;
-        sub1 = DecodeMulti<Key>(in, last, ctx);
-        if (!sub1) return {};
-        bool have_else = false;
-        NodeRef<Key> sub2;
-        if (last - in == 0) return {};
-        if (in[0].first == OP_ELSE) {
-            ++in;
-            have_else = true;
-            sub2 = DecodeMulti<Key>(in, last, ctx);
-            if (!sub2) return {};
-        }
-        if (last - in == 0 || (in[0].first != OP_IF && in[0].first != OP_NOTIF)) return {};
-        bool negated = (in[0].first == OP_NOTIF);
-        ++in;
-
-        if (!have_else && !negated) {
-            if (last > in && in[0].first == OP_DUP) {
-                ++in;
-                return MakeNodeRef<Key>(NodeType::WRAP_D, Vector(std::move(sub1)));
-            }
-            if (last - in >= 2 && in[0].first == OP_0NOTEQUAL && in[1].first == OP_SIZE) {
-                in += 2;
-                return MakeNodeRef<Key>(NodeType::WRAP_J, Vector(std::move(sub1)));
-            }
-            return {};
-        }
-        if (have_else && negated) {
-            auto sub3 = DecodeSingle<Key>(in, last, ctx);
-            if (!sub3) return {};
-            return MakeNodeRef<Key>(NodeType::ANDOR, Vector(std::move(sub3), std::move(sub1), std::move(sub2)));
-        }
-        if (!have_else && negated) {
-            if (last - in >= 2 && in[0].first == OP_IFDUP) {
-                ++in;
-                auto sub3 = DecodeSingle<Key>(in, last, ctx);
-                if (!sub3) return {};
-                return MakeNodeRef<Key>(NodeType::OR_D, Vector(std::move(sub3), std::move(sub1)));
-            }
-            if (last > in) {
-                auto sub3 = DecodeSingle<Key>(in, last, ctx);
-                if (!sub3) return {};
-                return MakeNodeRef<Key>(NodeType::OR_C, Vector(std::move(sub3), std::move(sub1)));
-            }
-            return {};
-        }
-        if (have_else && !negated) {
-            return MakeNodeRef<Key>(NodeType::OR_I, Vector(std::move(sub2), std::move(sub1)));
-        }
-        return {};
-    }
-    keys.clear();
-    if (last - in >= 3 && in[0].first == OP_CHECKMULTISIG) {
-        int64_t n;
-        if (!ParseScriptNumber(in[1], n)) return {};
-        if (last - in < 3 + n) return {};
-        if (n < 1 || n > 20) return {};
-        for (int i = 0; i < n; ++i) {
-            Key key;
-            if (in[2 + i].second.size() != 33) return {};
-            if (!ctx.FromPKBytes(in[2 + i].second.begin(), in[2 + i].second.end(), key)) return {};
-            keys.push_back(std::move(key));
-        }
-        if (!ParseScriptNumber(in[2 + n], k)) return {};
-        if (k < 1 || k > n) return {};
-        in += 3 + n;
-        std::reverse(keys.begin(), keys.end());
-        return MakeNodeRef<Key>(NodeType::MULTI, std::move(keys), k);
-    }
-    subs.clear();
-    if (last - in >= 3 && in[0].first == OP_EQUAL && ParseScriptNumber(in[1], k)) {
-        if (k < 1) {
-            return {};
-        }
-        in += 2;
-        while (last - in >= 2 && in[0].first == OP_ADD) {
-            ++in;
-            auto sub = DecodeWrapped<Key>(in, last, ctx);
-            if (!sub) return {};
-            subs.push_back(std::move(sub));
-        }
-        auto sub = DecodeSingle<Key>(in, last, ctx);
-        if (!sub) return {};
-        subs.push_back(std::move(sub));
-        if (static_cast<unsigned int>(k) > subs.size()) {
-            return {};
-        }
-        std::reverse(subs.begin(), subs.end());
-        return MakeNodeRef<Key>(NodeType::THRESH, std::move(subs), k);
-    }
-
-    return {};
-}
-
-//! Decode a list of script elements into a miniscript (except a: and s:)
-template<typename Key, typename Ctx, typename I>
-inline NodeRef<Key> DecodeMulti(I& in, I last, const Ctx& ctx) {
-    if (in == last) return {};
-    auto sub = DecodeSingle<Key>(in, last, ctx);
-    if (!sub) return {};
-    while (in != last && in[0].first != OP_ELSE && in[0].first != OP_IF && in[0].first != OP_NOTIF && in[0].first != OP_TOALTSTACK && in[0].first != OP_SWAP) {
-        auto sub2 = DecodeSingle<Key>(in, last, ctx);
-        if (!sub2) return {};
-        sub = MakeNodeRef<Key>(NodeType::AND_V, Vector(std::move(sub2), std::move(sub)));
-    }
-    return sub;
-}
-
-//! Decode a list of script elements into a miniscript (only a: and s:)
-template<typename Key, typename Ctx, typename I>
-inline NodeRef<Key> DecodeWrapped(I& in, I last, const Ctx& ctx) {
-    if (last - in >= 3 && in[0].first == OP_FROMALTSTACK) {
-        ++in;
-        auto sub = DecodeMulti<Key>(in, last, ctx);
-        if (!sub) return {};
-        if (in == last || in[0].first != OP_TOALTSTACK) return {};
-        ++in;
-        return MakeNodeRef<Key>(NodeType::WRAP_A, Vector(std::move(sub)));
-    }
-    auto sub = DecodeMulti<Key>(in, last, ctx);
-    if (!sub) return {};
-    if (in == last || in[0].first != OP_SWAP) return {};
-    ++in;
-    return MakeNodeRef<Key>(NodeType::WRAP_S, Vector(std::move(sub)));
+    if (constructed.size() != 1) return {};
+    return constructed.front();
 }
 
 } // namespace internal
@@ -1693,7 +1460,7 @@ inline NodeRef<typename Ctx::Key> FromScript(const CScript& script, const Ctx& c
     std::vector<std::pair<opcodetype, std::vector<unsigned char>>> decomposed;
     if (!DecomposeScript(script, decomposed)) return {};
     auto it = decomposed.begin();
-    auto ret = DecodeMulti<typename Ctx::Key>(it, decomposed.end(), ctx);
+    auto ret = DecodeScript<typename Ctx::Key>(it, decomposed.end(), ctx);
     if (!ret) return {};
     if (it != decomposed.end()) return {};
     return ret;
