@@ -818,6 +818,7 @@ namespace internal {
 enum class DecodeContext {
     // Parse and Decode
     Expression,
+    WExpression,
     Alt,
     Check,
     DupIf,
@@ -830,10 +831,10 @@ enum class DecodeContext {
     OrB,
     OrC,
     OrD,
+    Swap,
     ThreshW,
     ThreshE,
     // Decode
-    MaybeSwap,
     MaybeAndV,
     EndIf,
     EndIfNotIf,
@@ -841,8 +842,6 @@ enum class DecodeContext {
     // Parse
     Comma,
     CloseBracket,
-    MaybeWrappers,
-    Swap,
     WrapU,
     WrapT,
     AndN,
@@ -882,7 +881,7 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx)
     std::vector<std::tuple<DecodeContext, int64_t, int64_t>> to_parse;
     std::vector<NodeRef<Key>> constructed;
 
-    to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+    to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
 
     auto iter = in.begin();
 
@@ -894,7 +893,7 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx)
         to_parse.pop_back();
 
         switch(cur_context) {
-        case DecodeContext::MaybeWrappers: {
+        case DecodeContext::WExpression: {
             int colon_index = -1;
             for (int i = 1; iter + i < in.end(); ++i) {
                 if (iter[i] == ':') {
@@ -1039,15 +1038,15 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx)
                 if (!ParseInt64(std::string(iter, iter+next_comma), &k)) return {};
                 iter += next_comma + 1;
                 to_parse.emplace_back(DecodeContext::ThreshW, 0, k);
-                to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
             } else if (StartsWith("andor(", iter, in.end())) {
                 to_parse.emplace_back(DecodeContext::AndOr, -1, -1);
                 to_parse.emplace_back(DecodeContext::CloseBracket, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
                 to_parse.emplace_back(DecodeContext::Comma, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
                 to_parse.emplace_back(DecodeContext::Comma, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
             } else {
                 if (StartsWith("and_n(", iter, in.end())) {
                     to_parse.emplace_back(DecodeContext::AndN, -1, -1);
@@ -1067,9 +1066,9 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx)
                     return {};
                 }
                 to_parse.emplace_back(DecodeContext::CloseBracket, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
                 to_parse.emplace_back(DecodeContext::Comma, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
             }
             break;
         }
@@ -1160,7 +1159,7 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx)
             if (*iter == ',') {
                 ++iter;
                 to_parse.emplace_back(DecodeContext::ThreshW, n+1, k);
-                to_parse.emplace_back(DecodeContext::MaybeWrappers, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
             } else {
                 to_parse.emplace_back(DecodeContext::ThreshE, n+1, k);
             }
@@ -1218,9 +1217,9 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
     std::vector<std::tuple<DecodeContext, int64_t, int64_t>> to_parse;
     std::vector<NodeRef<Key>> constructed;
 
-    // There may be implicit and_v expressions [X] [Y] or s: wrapper SWAP [X]
+    // There may be implicit and_v expressions [X] [Y]
     to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
-    to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
+    // This is the top level, so we assume it is a B-type expression
     to_parse.emplace_back(DecodeContext::Expression, -1, -1);
 
     while (!to_parse.empty()) {
@@ -1327,20 +1326,11 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 in += 2;
                 to_parse.emplace_back(DecodeContext::ThreshW, 0, k);
             }
-            // a: wrapper
-            else if (in[0].first == OP_FROMALTSTACK) {
-                ++in;
-                to_parse.emplace_back(DecodeContext::Alt, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
-                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
-            }
             // OP_ENDIF can be WRAP_J, WRAP_D, ANDOR, OR_C, OR_D, or OR_I
             else if (in[0].first == OP_ENDIF) {
                 ++in;
                 to_parse.emplace_back(DecodeContext::EndIf, -1, -1);
                 to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
                 to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             }
             // and_b
@@ -1348,16 +1338,14 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 ++in;
                 to_parse.emplace_back(DecodeContext::AndB, -1, -1);
                 to_parse.emplace_back(DecodeContext::Expression, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
-                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
             }
             // or_b
             else if (in[0].first == OP_BOOLOR) {
                 ++in;
                 to_parse.emplace_back(DecodeContext::OrB, -1, -1);
                 to_parse.emplace_back(DecodeContext::Expression, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
-                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
             }
             else {
                 // Unrecognised expression
@@ -1365,6 +1353,20 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
             }
             break;
         }
+        case DecodeContext::WExpression: {
+            if (in >= last) return {};
+            if (in[0].first == OP_FROMALTSTACK) {
+                // a: wrapper
+                ++in;
+                to_parse.emplace_back(DecodeContext::Alt, -1, -1);
+            } else {
+                // s: wrapper
+                to_parse.emplace_back(DecodeContext::Swap, -1, -1);
+            }
+            to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
+            to_parse.emplace_back(DecodeContext::Expression, -1, -1);
+            break;
+         }
         case DecodeContext::MaybeAndV: {
             // If we reach a potential AND_V top-level, check if the next part of the script could be another AND_V child
             if (in < last && in[0].first != OP_IF && in[0].first != OP_ELSE && in[0].first != OP_NOTIF && in[0].first != OP_TOALTSTACK && in[0].first != OP_SWAP) {
@@ -1373,12 +1375,12 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
             }
             break;
         }
-        case DecodeContext::MaybeSwap: {
-            if (in < last && in[0].first == OP_SWAP) {
-                ++in;
-                WrapBack(NodeType::WRAP_S, constructed);
-                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
-            }
+        case DecodeContext::Swap: {
+            if (in >= last || in[0].first != OP_SWAP) return {};
+            ++in;
+            NodeRef<Key> node = MakeNodeRef<Key>(NodeType::WRAP_S, Vector(std::move(constructed.back())));
+            constructed.pop_back();
+            constructed.push_back(std::move(node));
             break;
         }
         case DecodeContext::Alt: {
@@ -1447,11 +1449,11 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
             if (in[0].first == OP_ADD) {
                 ++in;
                 to_parse.emplace_back(DecodeContext::ThreshW, n+1, k);
+                to_parse.emplace_back(DecodeContext::WExpression, -1, -1);
             } else {
                 to_parse.emplace_back(DecodeContext::ThreshE, n+1, k);
+                to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             }
-            to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
-            to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             break;
         }
         case DecodeContext::ThreshE: {
@@ -1472,7 +1474,6 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 ++in;
                 to_parse.emplace_back(DecodeContext::EndIfElse, -1, -1);
                 to_parse.emplace_back(DecodeContext::MaybeAndV, -1, -1);
-                to_parse.emplace_back(DecodeContext::MaybeSwap, -1, -1);
                 to_parse.emplace_back(DecodeContext::Expression, -1, -1);
             }
             // could be j: or d: wrapper
